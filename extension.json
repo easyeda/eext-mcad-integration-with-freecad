@@ -1,0 +1,56 @@
+{
+	"name": "pcb-export-to-freecad",
+	"uuid": "bbf0279eb3594be8a9a43aa5f08e9370",
+	"displayName": "导出至FreeCAD",
+	"description": "通过WebSocket将PCB 3D模型发到FreeCAD进行查看和编辑",
+	"version": "1.0.0",
+	"publisher": "王一凡",
+	"engines": {
+		"eda": "^3.0.0"
+	},
+	"license": "Apache-2.0",
+	"repository": {
+		"type": "extension-store",
+		"url": ""
+	},
+	"categories": "PCB",
+	"keywords": ["FreeCAD", "PCB", "STEP", "3D", "WebSocket"],
+	"images": {
+		"logo": "./images/logo.png"
+	},
+	"homepage": "",
+	"bugs": "",
+	"activationEvents": {},
+	"entry": "./dist/index",
+	"dependentExtensions": {},
+	"headerMenus": {
+		"pcb": [
+			{
+				"id": "exportToFreeCAD",
+				"title": "导出至FreeCAD",
+				"menuItems": [
+					{
+						"id": "ConnectFreeCAD",
+						"title": "连接FreeCAD",
+						"registerFn": "connectFreeCAD"
+					},
+					{
+						"id": "ExportToFreeCAD",
+						"title": "导出到FreeCAD",
+						"registerFn": "exportToFreeCAD"
+					},
+					{
+						"id": "CheckFreeCADConnection",
+						"title": "检查连接状态",
+						"registerFn": "checkFreeCADConnection"
+					},
+					{
+						"id": "DisconnectFreeCAD",
+						"title": "断开连接",
+						"registerFn": "disconnectFreeCAD"
+					}
+				]
+			}
+		]
+	}
+}
