@@ -19,6 +19,29 @@ import sys
 import os
 import subprocess
 
+def get_python_executable():
+    """获取正确的Python解释器路径（FreeCAD中sys.executable指向FreeCAD.exe）"""
+    # sys.executable 如果是python则直接使用
+    if 'python' in os.path.basename(sys.executable).lower():
+        return sys.executable
+
+    # 在FreeCAD安装目录下查找python.exe
+    freecad_dir = os.path.dirname(sys.executable)
+    for name in ('python3.exe', 'python.exe', 'python'):
+        candidate = os.path.join(freecad_dir, name)
+        if os.path.isfile(candidate):
+            return candidate
+
+    # bin子目录
+    bin_dir = os.path.join(freecad_dir, 'bin')
+    for name in ('python3.exe', 'python.exe', 'python'):
+        candidate = os.path.join(bin_dir, name)
+        if os.path.isfile(candidate):
+            return candidate
+
+    return sys.executable
+
+
 def check_and_install_websockets():
     """检查并自动安装websockets库"""
     print("检查websockets库...")
@@ -31,7 +54,8 @@ def check_and_install_websockets():
         print("websockets库未安装，正在自动安装...")
 
         try:
-            python_exe = sys.executable
+            python_exe = get_python_executable()
+            print(f"使用Python解释器: {python_exe}")
             result = subprocess.run([
                 python_exe, "-m", "pip", "install", "websockets==13.1"
             ], capture_output=True, text=True, check=True)
@@ -151,7 +175,7 @@ class WebSocketPCBServer:
             await websocket.send(json.dumps({
                 "type": "upload_progress",
                 "progress": 50,
-                "status": "正在处理文件..."
+                "status": "processing"
             }))
 
             file_bytes = bytes(file_data)
@@ -164,7 +188,7 @@ class WebSocketPCBServer:
             await websocket.send(json.dumps({
                 "type": "upload_progress",
                 "progress": 100,
-                "status": "文件上传完成"
+                "status": "upload_done"
             }))
 
             await websocket.send(json.dumps({

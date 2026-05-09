@@ -6,7 +6,7 @@
 	"连接FreeCAD失败: ${1}": "Failed to connect to FreeCAD: ${1}",
 	"成功连接到FreeCAD服务器!": "Successfully connected to FreeCAD server!",
 	"FreeCAD连接已确认": "FreeCAD connection confirmed",
-	"上传进度: ${1}% - ${2}": "Upload progress: ${1}% - ${2}",
+	"处理中 ${1}%": "Processing ${1}%",
 	"文件上传完成，正在导入到FreeCAD...": "File upload completed, importing to FreeCAD...",
 	"PCB导入完成: ${1}": "PCB import completed: ${1}",
 	"FreeCAD错误: ${1}": "FreeCAD error: ${1}",
@@ -23,5 +23,6 @@
 	"断开连接失败: ${1}": "Failed to disconnect: ${1}",
 	"已连接": "Connected",
 	"未连接": "Disconnected",
-	"FreeCAD连接状态: ${1}": "FreeCAD connection status: ${1}"
+	"FreeCAD连接状态: ${1}": "FreeCAD connection status: ${1}",
+	"收到无效的FreeCAD消息": "Received invalid FreeCAD message"
 }

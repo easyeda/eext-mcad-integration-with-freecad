@@ -1,8 +1,6 @@
 {
-	"About...": "About...",
-	"FreeCAD导出": "FreeCAD Export",
-	"连接FreeCAD": "Connect FreeCAD",
+	"FreeCAD机电协同": "FreeCAD MCAD Integration",
 	"导出到FreeCAD": "Export to FreeCAD",
-	"断开连接": "Disconnect",
-	"重置插件": "Reset Plugin"
+	"连接FreeCAD": "Connect FreeCAD",
+	"断开连接": "Disconnect"
 }

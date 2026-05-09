@@ -1,8 +1,6 @@
 {
-	"About...": "关于...",
-	"FreeCAD导出": "FreeCAD导出",
-	"连接FreeCAD": "连接FreeCAD",
+	"FreeCAD机电协同": "FreeCAD机电协同",
 	"导出到FreeCAD": "导出到FreeCAD",
-	"断开连接": "断开连接",
-	"重置插件": "重置插件"
+	"连接FreeCAD": "连接FreeCAD",
+	"断开连接": "断开连接"
 }

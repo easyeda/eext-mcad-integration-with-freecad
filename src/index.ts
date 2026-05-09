@@ -125,12 +125,13 @@ function handleFreeCADMessage(event: MessageEvent<any>): void {
 		const message = JSON.parse(event.data);
 
 		switch (message.type) {
-			case 'upload_progress':
-				eda.sys_Message.showToastMessage(
-					eda.sys_I18n.text('上传进度: ${1}% - ${2}', undefined, undefined, message.progress, message.status),
-					ESYS_ToastMessageType.INFO
-				);
-				break;
+			case 'upload_progress': {
+					eda.sys_Message.showToastMessage(
+						eda.sys_I18n.text('处理中 ${1}%', undefined, undefined, message.progress),
+						ESYS_ToastMessageType.INFO
+					);
+					break;
+				}
 
 			case 'upload_complete':
 				eda.sys_Message.showToastMessage(

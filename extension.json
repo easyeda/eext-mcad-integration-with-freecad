@@ -3,7 +3,7 @@
 	"uuid": "bbf0279eb3594be8a9a43aa5f08e9370",
 	"displayName": "FreeCAD机电协同",
 	"description": "通过WebSocket将PCB 3D模型发到FreeCAD进行查看和编辑",
-	"version": "1.0.0",
+	"version": "1.0.1",
 	"publisher": "王一凡",
 	"engines": {
 		"eda": "^3.0.0"
@@ -14,7 +14,13 @@
 		"url": ""
 	},
 	"categories": "PCB",
-	"keywords": ["FreeCAD", "PCB", "STEP", "3D", "WebSocket"],
+	"keywords": [
+		"FreeCAD",
+		"PCB",
+		"STEP",
+		"3D",
+		"WebSocket"
+	],
 	"images": {
 		"logo": "./images/logo.png"
 	},
@@ -30,14 +36,19 @@
 				"title": "FreeCAD机电协同",
 				"menuItems": [
 					{
+						"id": "ExportToFreeCAD",
+						"title": "导出到FreeCAD",
+						"registerFn": "exportToFreeCAD"
+					},
+					{
 						"id": "ConnectFreeCAD",
 						"title": "连接FreeCAD",
 						"registerFn": "connectFreeCAD"
 					},
 					{
-						"id": "ExportToFreeCAD",
-						"title": "导出到FreeCAD",
-						"registerFn": "exportToFreeCAD"
+						"id": "DisconnectFreeCAD",
+						"title": "断开连接",
+						"registerFn": "disconnectFreeCAD"
 					}
 				]
 			}
