@@ -190,15 +190,31 @@ class WebSocketPCBServer:
             import FreeCAD
             import ImportGui
 
-            doc = FreeCAD.newDocument("PCB_Step_Import")
-            FreeCAD.setActiveDocument(doc.Name)
-
             print(f"导入STEP文件: {file_path}")
+
             ImportGui.open(file_path)
 
             doc = FreeCAD.ActiveDocument
+            if doc is None:
+                print("错误: 导入后没有活动文档")
+                return False
+
             num_objects = len(doc.Objects)
             print(f"导入成功，共 {num_objects} 个对象")
+
+            self.center_model(doc)
+
+            try:
+                doc.recompute()
+            except Exception as e:
+                print(f"recompute 失败: {e}")
+
+            try:
+                import FreeCADGui
+                FreeCADGui.ActiveDocument.ActiveView.viewIsometric()
+                FreeCADGui.SendMsgToActiveView("ViewFit")
+            except Exception as e:
+                print(f"视图调整失败（不影响导入）: {e}")
 
             return True
         except Exception as e:
@@ -206,6 +222,64 @@ class WebSocketPCBServer:
             import traceback
             traceback.print_exc()
             return False
+
+    def center_model(self, doc):
+        """将文档中所有对象居中到原点"""
+        try:
+            import FreeCAD
+
+            bb_min_x = float('inf')
+            bb_min_y = float('inf')
+            bb_min_z = float('inf')
+            bb_max_x = float('-inf')
+            bb_max_y = float('-inf')
+            bb_max_z = float('-inf')
+            has_valid = False
+
+            for obj in doc.Objects:
+                try:
+                    if hasattr(obj, 'Shape') and obj.Shape is not None and hasattr(obj.Shape, 'BoundBox'):
+                        bb = obj.Shape.BoundBox
+                    elif hasattr(obj, 'Mesh') and obj.Mesh is not None and hasattr(obj.Mesh, 'BoundBox'):
+                        bb = obj.Mesh.BoundBox
+                    else:
+                        continue
+
+                    bb_min_x = min(bb_min_x, bb.XMin)
+                    bb_min_y = min(bb_min_y, bb.YMin)
+                    bb_min_z = min(bb_min_z, bb.ZMin)
+                    bb_max_x = max(bb_max_x, bb.XMax)
+                    bb_max_y = max(bb_max_y, bb.YMax)
+                    bb_max_z = max(bb_max_z, bb.ZMax)
+                    has_valid = True
+                except Exception:
+                    continue
+
+            if not has_valid:
+                print("未找到可计算包围盒的对象")
+                return
+
+            cx = (bb_min_x + bb_max_x) / 2
+            cy = (bb_min_y + bb_max_y) / 2
+            cz = (bb_min_z + bb_max_z) / 2
+            print(f"模型包围盒中心: ({cx:.2f}, {cy:.2f}, {cz:.2f})")
+
+            if abs(cx) < 0.01 and abs(cy) < 0.01 and abs(cz) < 0.01:
+                print("模型已居中，无需移动")
+                return
+
+            for obj in doc.Objects:
+                if hasattr(obj, 'Placement'):
+                    try:
+                        p = obj.Placement
+                        new_base = FreeCAD.Vector(p.Base.x - cx, p.Base.y - cy, p.Base.z - cz)
+                        obj.Placement = FreeCAD.Placement(new_base, p.Rotation)
+                    except Exception:
+                        continue
+
+            print("模型已居中到原点")
+        except Exception as e:
+            print(f"居中处理失败（不影响导入）: {e}")
 
     def process_message_queue(self):
         """处理消息队列中的任务（在FreeCAD主线程中定时调用）"""

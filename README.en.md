@@ -1,47 +1,100 @@
-[简体中文](./README.md) | [English](#) | [繁體中文](./README.zh-Hant.md) | [日本語](./README.ja.md) | [Русский](./README.ru.md)
+[简体中文](./README.md) | [English](#)
 
-# pro-api-sdk
+# Export to FreeCAD
 
-JLCEDA & EasyEDA Pro Extension API Development Kit
+Send PCB 3D models (STEP format) to FreeCAD via WebSocket for viewing and editing.
 
-<a href="https://github.com/easyeda/pro-api-sdk" style="vertical-align: inherit;" target="_blank"><img src="https://img.shields.io/github/stars/easyeda/pro-api-sdk" alt="GitHub Repo Stars" class="not-medium-zoom-image" style="display: inline; vertical-align: inherit;" /></a>&nbsp;<a href="https://github.com/easyeda/pro-api-sdk/issues" style="vertical-align: inherit;" target="_blank"><img src="https://img.shields.io/github/issues/easyeda/pro-api-sdk" alt="GitHub Issues" class="not-medium-zoom-image" style="display: inline; vertical-align: inherit;" /></a>&nbsp;<a href="https://github.com/easyeda/pro-api-sdk" style="vertical-align: inherit;" target="_blank"><img src="https://img.shields.io/github/repo-size/easyeda/pro-api-sdk" alt="GitHub Repo Size" class="not-medium-zoom-image" style="display: inline; vertical-align: inherit;" /></a>&nbsp;<a href="https://choosealicense.com/licenses/apache-2.0/" style="vertical-align: inherit;" target="_blank"><img src="https://img.shields.io/github/license/easyeda/pro-api-sdk" alt="GitHub License" class="not-medium-zoom-image" style="display: inline; vertical-align: inherit;" /></a>&nbsp;<a href="https://www.npmjs.com/package/@jlceda/pro-api-types" style="vertical-align: inherit;" target="_blank"><img src="https://img.shields.io/npm/v/%40jlceda%2Fpro-api-types?label=pro-api-types" alt="NPM Version" class="not-medium-zoom-image" style="display: inline; vertical-align: inherit;" /></a>&nbsp;<a href="https://www.npmjs.com/package/@jlceda/pro-api-types" style="vertical-align: inherit;" target="_blank"><img src="https://img.shields.io/npm/d18m/%40jlceda%2Fpro-api-types" alt="NPM Downloads" class="not-medium-zoom-image" style="display: inline; vertical-align: inherit;" /></a>
+## Features
 
-> [!NOTE]
->
-> For more information on the development of EasyEDA Pro Extension, please visit: [https://prodocs.easyeda.com/en/api/guide/](https://prodocs.easyeda.com/en/api/guide/)
+- Export PCB 3D models to FreeCAD via WebSocket
+- Supports STEP format export
+- Auto-install Python dependencies
+- Progress bar display
+- Easy menu operation
 
-## Enter Development
+## Quick Start
 
-This development tool set contains all the environments and tools for developing the [EasyEDA Pro Edition](https://pro.easyeda.com/) extension package, and has built-in recommended rules for ESLint.
+### 1. Install FreeCAD WebSocket Server Script
 
-1. Clone the [pro-api-sdk](https://github.com/easyeda/pro-api-sdk) project repository to your local computer
+#### Run script using Macro
 
-    ```shell
-    git clone --depth=1 https://github.com/easyeda/pro-api-sdk.git
-    ```
+1. **Open FreeCAD**
+2. Click **Macro** → **Macro Editor** in the top menu bar
+3. In the Macro Editor:
+   - Click **New** to create a new macro
+   - Paste the content of `script/pcb_importer_freecad.py`
+   - Click **Save** and name it `pcb_importer`
+   - Click **Execute** to run the script
 
-2. Initializing the development environment (installing dependencies)
+The script will automatically detect and install the `websockets` dependency.
 
-    ```shell
-    npm install
-    ```
+After successful startup, you will see output similar to:
 
-3. Make your changes ...
+```
+Checking websockets library...
+websockets library is installed
+Initializing WebSocket server 0.0.0.0:8766
+WebSocket server started successfully!
+Address: ws://localhost:8766
+FreeCAD environment detected, server started
+Main thread timer registered (100ms polling)
+Waiting for client connection...
+```
 
-    - Rename the folder to your project name
-    - Refer to the [Development Guide](https://prodocs.lceda.cn/en/api/guide/how-to-start.html#ii-extension-configuration) to modify the `name`, `displayName`, `description`, and `publisher` fields in `extension.json`
-    - Write your code using the [Extension API Reference](https://prodocs.lceda.cn/en/api/reference/pro-api.html)
+### 2. Install Extension
 
-4. Compile the extension package
+1. **Install in JLCEDA Pro:**
+   - Open JLCEDA Pro
+   - Click **Extensions** → **Extension Manager**
+   - Click **Install Extension** → **Install from Local File**
+   - Select `build/dist/pcb-export-to-freecad_v1.0.0.eext`
+   - Enable the extension and grant external interaction permissions
 
-    ```shell
-    npm run build
-    ```
+### 3. Use Extension
 
-5. Install the extension package generated under `./build/dist/` in EasyEDA Pro Edition
+1. In the PCB editor, click **Export to FreeCAD** in the top menu
+2. Select **Connect to FreeCAD** (ensure FreeCAD server is running)
+3. After successful connection, select **Export to FreeCAD**
+4. The PCB model will be automatically sent to FreeCAD and imported
 
-## Open-source License
+## Menu Functions
 
-<a href="https://choosealicense.com/licenses/apache-2.0/" style="vertical-align: inherit;" target="_blank"><img src="https://img.shields.io/github/license/easyeda/pro-api-sdk" alt="GitHub License" class="not-medium-zoom-image" style="display: inline; vertical-align: inherit;" /></a>
+| Menu Option | Description |
+| ---------- | ----------- |
+| Connect to FreeCAD | Connect to FreeCAD WebSocket server |
+| Export to FreeCAD | Send PCB STEP file to FreeCAD |
+| Check Connection Status | View current connection status with FreeCAD |
+| Disconnect | Disconnect from FreeCAD |
 
-This development tool uses the [Apache License 2.0](https://choosealicense.com/licenses/apache-2.0/) open source license agreement. You can only use the **嘉立创EDA** and **EasyEDA** trademark information for the **function description part** and **open source release title part** of the extension package developed based on this tool.
+## Technical Notes
+
+- **Communication Method**: WebSocket
+- **WebSocket Port**: 8766
+- **File Format**: STEP (.step)
+- **FreeCAD Version Requirement**: 1.0 or higher
+
+## FAQ
+
+**Q: Failed to connect to FreeCAD?**
+
+A: Please ensure:
+
+1. FreeCAD is running and the WebSocket server script is active
+2. Port 8766 is not occupied
+3. JLCEDA extension has external interaction permissions enabled
+
+**Q: Need to install additional dependencies?**
+
+A: The script will automatically install the `websockets` library on first run. If automatic installation fails, run manually:
+
+```shell
+"<FreeCAD installation directory>/bin/python.exe" -m pip install websockets==13.1
+```
+
+**Q: FreeCAD has no response after import?**
+
+A: Please ensure **View → Panels → Report View** is open in FreeCAD to check for error logs.
+
+## Open Source License
+
+This extension is licensed under the [Apache License 2.0](https://choosealicense.com/licenses/apache-2.0/).
