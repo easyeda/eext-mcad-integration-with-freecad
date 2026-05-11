@@ -81,6 +81,7 @@ if not check_and_install_websockets():
 import websockets
 import asyncio
 import json
+import re
 import threading
 import tempfile
 import shutil
@@ -130,6 +131,15 @@ class WebSocketPCBServer:
 
         print(f"初始化WebSocket服务器 {host}:{port}")
 
+    def _resolve_designator(self, designator):
+        """大小写无关查找 designator 实际存储的 key"""
+        if designator in self.designator_map:
+            return designator
+        for key in self.designator_map:
+            if key.upper() == designator.upper():
+                return key
+        return None
+
     async def register_client(self, websocket, path=None):
         self.clients.add(websocket)
         try:
@@ -170,6 +180,8 @@ class WebSocketPCBServer:
                 self.handle_delete_object(data)
             elif message_type == 'cross_probe':
                 self.handle_cross_probe(data)
+            elif message_type == 'rename_designator':
+                self.handle_rename_designator(data)
             elif message_type == 'enable_monitor':
                 self.enable_monitor()
             elif message_type == 'disable_monitor':
@@ -424,39 +436,40 @@ class WebSocketPCBServer:
                         used_fc_objects.add(i)
                         break
 
-            # 第二轮：label 包含匹配（FC label 包含 designator，或反过来）
+            # 第二轮：label 单词边界匹配（R1 匹配 "R1_body" 但不匹配 "R10"）
             for comp in components:
                 designator = comp['designator']
                 if designator in self.designator_map:
                     continue
-                desig_upper = designator.upper()
+                pattern = re.compile(r'(^|[-_.\s])' + re.escape(designator) + r'($|[-_.\s])', re.IGNORECASE)
                 for i, fc_obj in enumerate(freecad_objects):
                     if i in used_fc_objects:
                         continue
-                    label_upper = fc_obj['label'].upper()
-                    if desig_upper in label_upper or label_upper in desig_upper:
+                    if pattern.search(fc_obj['label']):
                         self.designator_map[designator] = fc_obj['label']
                         self.label_map[fc_obj['label']] = designator
                         mapping.append({'designator': designator, 'freecadLabel': fc_obj['label']})
                         used_fc_objects.add(i)
                         break
 
-            # 第三轮：位置匹配（EDA 坐标是 mil，FreeCAD 是 mm）
-            # EDA mil → mm: 乘以 0.0254
-            MIL_TO_MM = 0.0254
+            # 第三轮：位置匹配（EDA 已发送 mm 坐标，需补偿居中偏移）
             TOLERANCE_MM = 2.0  # 2mm 容忍度
+            cx, cy = self.center_offset['x'], self.center_offset['y']
             for comp in components:
                 designator = comp['designator']
                 if designator in self.designator_map:
                     continue
-                eda_x_mm = comp.get('x', 0) * MIL_TO_MM
-                eda_y_mm = comp.get('y', 0) * MIL_TO_MM
+                eda_x_mm = comp.get('x', 0)  # EDA 已转 mm，不再乘 MIL_TO_MM
+                eda_y_mm = comp.get('y', 0)
                 best_match = None
                 best_dist = float('inf')
                 for i, fc_obj in enumerate(freecad_objects):
                     if i in used_fc_objects:
                         continue
-                    dist = ((fc_obj['x'] - eda_x_mm) ** 2 + (fc_obj['y'] - eda_y_mm) ** 2) ** 0.5
+                    # FC 对象位置 = 原始位置 - 居中偏移，所以要加回偏移再比较
+                    fc_real_x = fc_obj['x'] + cx
+                    fc_real_y = fc_obj['y'] + cy
+                    dist = ((fc_real_x - eda_x_mm) ** 2 + (fc_real_y - eda_y_mm) ** 2) ** 0.5
                     if dist < TOLERANCE_MM and dist < best_dist:
                         best_dist = dist
                         best_match = i
@@ -471,8 +484,10 @@ class WebSocketPCBServer:
             print(f"[映射] 完成: {len(mapping)}/{len(components)} 个元件匹配")
 
             # 构建同组对象：同一位置的对象归为一组，移动时一起移
+            # 收集所有主对象的 label，避免将其他元件的主对象归入错误分组
+            main_labels = set(self.designator_map.values())
             self.designator_groups.clear()
-            TOLERANCE = 1.0  # mm
+            TOLERANCE = 0.5  # mm，缩小容忍度避免误匹配
             for designator, main_label in self.designator_map.items():
                 # 找到主对象的中心位置
                 main_pos = None
@@ -482,13 +497,19 @@ class WebSocketPCBServer:
                         break
                 if not main_pos:
                     continue
-                # 找所有同位置的对象（包括自己）
-                group = []
+                # 只将非主对象的、同位置的对象归入分组
+                group = [main_label]  # 主对象始终在组内
                 for o in freecad_objects:
+                    if o['label'] == main_label:
+                        continue
+                    # 跳过其他元件的主对象
+                    if o['label'] in main_labels:
+                        continue
                     dist = ((o['x'] - main_pos[0]) ** 2 + (o['y'] - main_pos[1]) ** 2) ** 0.5
                     if dist < TOLERANCE:
                         group.append(o['label'])
-                        self.label_map[o['label']] = designator
+                        if o['label'] not in self.label_map:
+                            self.label_map[o['label']] = designator
                 self.designator_groups[designator] = group
                 if len(group) > 1:
                     print(f"  [分组] {designator}: {len(group)} 个对象 -> {group}")
@@ -523,6 +544,12 @@ class WebSocketPCBServer:
         try:
             import FreeCAD
             import FreeCAD as FC
+
+            resolved = self._resolve_designator(designator)
+            if not resolved:
+                print(f"[位置更新] 未找到 designator={designator} 的映射")
+                return
+            designator = resolved
 
             group = self.designator_groups.get(designator, [])
             if not group:
@@ -583,6 +610,82 @@ class WebSocketPCBServer:
         finally:
             self.last_update_source = None
 
+    def handle_rename_designator(self, data):
+        """EDA 通知位号变更"""
+        old = data.get('old')
+        new = data.get('new')
+        if not old or not new:
+            return
+        self.message_queue.put({
+            'type': 'rename_designator',
+            'old': old,
+            'new': new
+        })
+
+    def do_rename_designator(self, old, new):
+        """在���线程中更新位号映射，并修改 FreeCAD 对象的 Label"""
+        try:
+            import FreeCAD
+            doc = FreeCAD.ActiveDocument
+            if not doc:
+                return
+
+            resolved_old = self._resolve_designator(old)
+            if not resolved_old:
+                print(f"[重命名] 未找到旧位号={old} 的映射")
+                return
+            old = resolved_old
+
+            old_label = self.designator_map.pop(old, None)
+            if not old_label:
+                return
+
+            # 计算新 Label：将旧 Label 中的旧位号替换为新位号
+            new_label = old_label.replace(old, new) if old in old_label else new
+
+            # 更新所有映射表
+            self.designator_map[new] = new_label
+
+            group = self.designator_groups.pop(old, None)
+            if group:
+                self.designator_groups[new] = group
+                # 重命名同组所有对象的 Label
+                old_group = self.designator_groups.get(new, [])
+                new_group = []
+                for lbl in old_group:
+                    obj_lbl = lbl.replace(old, new) if old in lbl else lbl
+                    new_group.append(obj_lbl)
+                    # 更新 label_map
+                    desig = self.label_map.pop(lbl, None)
+                    if desig:
+                        self.label_map[obj_lbl] = new if desig == old else desig
+                    # 更新 last_positions
+                    pos = self.last_positions.pop(lbl, None)
+                    if pos:
+                        self.last_positions[obj_lbl] = pos
+                    # 更新 FreeCAD 对象 Label
+                    for o in doc.Objects:
+                        if o.Label == lbl:
+                            o.Label = obj_lbl
+                            break
+                self.designator_groups[new] = new_group
+            else:
+                # 没有分组，单独处理
+                desig = self.label_map.pop(old_label, None)
+                if desig:
+                    self.label_map[new_label] = new
+                pos = self.last_positions.pop(old_label, None)
+                if pos:
+                    self.last_positions[new_label] = pos
+                for o in doc.Objects:
+                    if o.Label == old_label:
+                        o.Label = new_label
+                        break
+
+            print(f"[重命名] {old}({old_label}) → {new}({new_label})")
+        except Exception as e:
+            print(f"重命名失败: {e}")
+
     def handle_delete_object(self, data):
         """EDA → FreeCAD 删除对象"""
         designator = data.get('designator')
@@ -597,6 +700,12 @@ class WebSocketPCBServer:
         """在主线程中删除对象及其同组对象"""
         try:
             import FreeCAD
+
+            resolved = self._resolve_designator(designator)
+            if not resolved:
+                print(f"[删除] 未找到 designator={designator} 的映射")
+                return
+            designator = resolved
 
             group = self.designator_groups.get(designator, [])
             label = self.designator_map.get(designator)
@@ -645,6 +754,11 @@ class WebSocketPCBServer:
             import FreeCAD
             import FreeCADGui
 
+            resolved = self._resolve_designator(designator)
+            if not resolved:
+                print(f"[交叉定位] 未找到 designator={designator} 的映射")
+                return
+            designator = resolved
             label = self.designator_map.get(designator)
             if not label:
                 return
@@ -793,6 +907,9 @@ class WebSocketPCBServer:
 
                 elif msg_type == 'position_update':
                     self.do_position_update(msg['designator'], msg['x'], msg['y'], msg['rotation'])
+
+                elif msg_type == 'rename_designator':
+                    self.do_rename_designator(msg['old'], msg['new'])
 
                 elif msg_type == 'delete_object':
                     self.do_delete_object(msg['designator'])

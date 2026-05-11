@@ -12,6 +12,7 @@ let isExporting = false;
 let isBidirectional = false;
 let designatorToPrimitiveId: Map<string, string> = new Map();
 let freecadLabelToDesignator: Map<string, string> = new Map();
+let primitiveIdToDesignator: Map<string, string> = new Map();
 
 // 心跳检测
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -202,7 +203,7 @@ export async function enableBidirectional(): Promise<void> {
 			const primitiveId = comp.getState_PrimitiveId();
 			if (designator) {
 				designatorToPrimitiveId.set(designator, primitiveId);
-			primitiveIdToDesignator.set(primitiveId, designator);
+				primitiveIdToDesignator.set(primitiveId, designator);
 			}
 		}
 		console.log(`[双向交互] 已获取 ${designatorToPrimitiveId.size} 个元件映射`);
@@ -213,12 +214,11 @@ export async function enableBidirectional(): Promise<void> {
 	// 2. 注册事件监听
 	eda.pcb_Event.addPrimitiveEventListener(BIDIRECTIONAL_LISTENER_ID, 'all', onPcbPrimitiveChange);
 	eda.pcb_Event.addMouseEventListener(BIDIRECTIONAL_MOUSE_ID, 'selected', onPcbMouseSelect);
-	console.log('[双向交互] 事件监听已注册, isBidirectional=' + isBidirectional);
 
 	// 3. 全量导出 STEP
 	await exportToFreeCAD();
 
-	// 4. 发送映射请求给 FreeCAD（FreeCAD import 完成后处理）
+	// 4. 发送映射请求给 FreeCAD
 	if (designatorToPrimitiveId.size > 0) {
 		const componentData: Array<{ designator: string; x: number; y: number; rotation: number }> = [];
 		for (const [designator, primitiveId] of designatorToPrimitiveId) {
@@ -263,19 +263,14 @@ function handleMappingResult(mapping: Array<{ designator: string; freecadLabel: 
 	}
 }
 
-// 反向查找：primitiveId → designator
-let primitiveIdToDesignator: Map<string, string> = new Map();
-
 function onPcbPrimitiveChange(eventType: string, props: any[]): void {
 	if (!isBidirectional) return;
 	for (const prop of props) {
-		// 依次尝试：直接 designator → 父元件 designator → 通过 pid 反查 → 通过 parentPid 反查
 		const designator =
 			prop.designator ||
 			prop.parentComponentDesignator ||
 			primitiveIdToDesignator.get(prop.primitiveId) ||
 			primitiveIdToDesignator.get(prop.parentComponentPrimitiveId);
-		console.log(`[双向交互] 图元 type=${eventType} pid=${prop.primitiveId} parentPid=${prop.parentComponentPrimitiveId} desig=${prop.designator} parentDesig=${prop.parentComponentDesignator} resolved=${designator}`);
 		if (!designator) continue;
 		if (eventType === 'move' || eventType === 'modify') {
 			syncPositionToFreecad(prop.primitiveId, designator);
@@ -285,20 +280,29 @@ function onPcbPrimitiveChange(eventType: string, props: any[]): void {
 	}
 }
 
-async function syncPositionToFreecad(primitiveId: string, designator: string): Promise<void> {
+async function syncPositionToFreecad(primitiveId: string, oldDesignator: string): Promise<void> {
 	try {
-		const targetId = designatorToPrimitiveId.get(designator) || primitiveId;
+		const targetId = designatorToPrimitiveId.get(oldDesignator) || primitiveId;
 		const comp = await eda.pcb_PrimitiveComponent.get(targetId);
-		if (!comp) {
-			console.log(`[双向交互] 未找到元件: designator=${designator} targetId=${targetId}`);
-			return;
+		if (!comp) return;
+
+		// 动态获取当前 designator（处理改名情况）
+		const currentDesignator = comp.getState_Designator();
+		if (!currentDesignator) return;
+
+		if (currentDesignator !== oldDesignator) {
+			// 位号变了，更新映射表并通知 FreeCAD
+			designatorToPrimitiveId.delete(oldDesignator);
+			designatorToPrimitiveId.set(currentDesignator, targetId);
+			primitiveIdToDesignator.set(targetId, currentDesignator);
+			sendToFreeCAD({ type: 'rename_designator', old: oldDesignator, new: currentDesignator });
+			console.log(`[双向交互] 位号变更: ${oldDesignator} → ${currentDesignator}`);
 		}
-		// EDA 坐标是 mil，FreeCAD 用 mm
+
 		const x_mm = comp.getState_X() * MIL_TO_MM;
 		const y_mm = comp.getState_Y() * MIL_TO_MM;
 		const rot = comp.getState_Rotation();
-		console.log(`[双向交互] 同步位置: ${designator} x=${x_mm.toFixed(2)}mm y=${y_mm.toFixed(2)}mm rot=${rot}`);
-		sendToFreeCAD({ type: 'position_update', designator, x: x_mm, y: y_mm, rotation: rot });
+		sendToFreeCAD({ type: 'position_update', designator: currentDesignator, x: x_mm, y: y_mm, rotation: rot });
 	} catch (error) { console.error('[双向交互] 同步位置失败:', error); }
 }
 
@@ -318,7 +322,6 @@ async function handlePositionUpdateFromFreecad(message: any): Promise<void> {
 	const primitiveId = designatorToPrimitiveId.get(designator);
 	if (!primitiveId) return;
 	try {
-		// FreeCAD 坐标是 mm，EDA 用 mil
 		const comp = await eda.pcb_PrimitiveComponent.get(primitiveId);
 		if (!comp) return;
 		comp.setState_X(message.x * MM_TO_MIL);
@@ -335,7 +338,6 @@ async function handleCrossProbeFromFreecad(message: any): Promise<void> {
 	try {
 		await eda.pcb_SelectControl.doCrossProbeSelect([designator], undefined, undefined, true, true);
 		if (message.x !== undefined && message.y !== undefined) {
-			// navigateToCoordinates 用 mil
 			await eda.pcb_Document.navigateToCoordinates(message.x * MM_TO_MIL, message.y * MM_TO_MIL);
 		}
 	} catch (error) { console.error('[双向交互] FreeCAD→EDA交叉定位失败:', error); }
