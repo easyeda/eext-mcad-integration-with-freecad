@@ -1,6 +1,8 @@
 {
 	"FreeCAD机电协同": "FreeCAD机电协同",
-	"导出到FreeCAD": "导出到FreeCAD",
+	"导出3D到FreeCAD": "导出3D到FreeCAD",
+	"启用双向交互": "启用双向交互",
+	"停止双向交互": "停止双向交互",
 	"连接FreeCAD": "连接FreeCAD",
-	"断开连接": "断开连接"
+	"断开FreeCAD": "断开FreeCAD"
 }

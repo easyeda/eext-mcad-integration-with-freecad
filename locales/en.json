@@ -24,5 +24,10 @@
 	"已连接": "Connected",
 	"未连接": "Disconnected",
 	"FreeCAD连接状态: ${1}": "FreeCAD connection status: ${1}",
-	"收到无效的FreeCAD消息": "Received invalid FreeCAD message"
+	"收到无效的FreeCAD消息": "Received invalid FreeCAD message",
+	"双向交互已启动，点击元件可以双向定位，拖动元件可以同步移动": "Bidirectional interaction enabled. Click to cross-probe, drag to sync position",
+	"双向交互已停止": "Bidirectional interaction stopped",
+	"正在建立元件映射...": "Building component mapping...",
+	"元件映射建立成功: ${1} 个元件": "Mapping established: ${1} components",
+	"元件映射失败": "Mapping failed"
 }

@@ -3,7 +3,7 @@
 	"uuid": "bbf0279eb3594be8a9a43aa5f08e9370",
 	"displayName": "FreeCAD机电协同",
 	"description": "通过WebSocket将PCB 3D模型发到FreeCAD进行查看和编辑",
-	"version": "1.0.1",
+	"version": "2.0.0",
 	"publisher": "王一凡",
 	"engines": {
 		"eda": "^3.0.0"
@@ -37,8 +37,18 @@
 				"menuItems": [
 					{
 						"id": "ExportToFreeCAD",
-						"title": "导出到FreeCAD",
+						"title": "导出3D到FreeCAD",
 						"registerFn": "exportToFreeCAD"
+					},
+					{
+						"id": "EnableBidirectional",
+						"title": "启用双向交互",
+						"registerFn": "enableBidirectional"
+					},
+					{
+						"id": "DisableBidirectional",
+						"title": "停止双向交互",
+						"registerFn": "disableBidirectional"
 					},
 					{
 						"id": "ConnectFreeCAD",
@@ -47,7 +57,7 @@
 					},
 					{
 						"id": "DisconnectFreeCAD",
-						"title": "断开连接",
+						"title": "断开FreeCAD",
 						"registerFn": "disconnectFreeCAD"
 					}
 				]

@@ -1,6 +1,8 @@
 {
 	"FreeCAD机电协同": "FreeCAD MCAD Integration",
-	"导出到FreeCAD": "Export to FreeCAD",
+	"导出3D到FreeCAD": "Export 3D to FreeCAD",
+	"启用双向交互": "Enable Bidirectional",
+	"停止双向交互": "Disable Bidirectional",
 	"连接FreeCAD": "Connect FreeCAD",
-	"断开连接": "Disconnect"
+	"断开FreeCAD": "Disconnect"
 }

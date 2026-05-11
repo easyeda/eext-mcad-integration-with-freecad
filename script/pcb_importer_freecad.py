@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-PCB FreeCAD导入器 - WebSocket服务器
+PCB FreeCAD导入器 - WebSocket服务器（支持双向交互）
 
 使用方法:
 1. 在FreeCAD中打开宏编辑器
 2. 复制此脚本内容到宏编辑器
 3. 运行宏启动WebSocket服务器
 4. 在嘉立创EDA中点击"连接FreeCAD"
-5. 点击"导出到FreeCAD"发送PCB STEP文件
+5. 点击"导出3D到FreeCAD"发送PCB STEP文件
+6. 点击"启用双向交互"开启位置同步和交叉定位
 
 FreeCAD相关：
 点击：视图 → 面板 → 报告视图 可以查看脚本运行日志
@@ -21,18 +22,15 @@ import subprocess
 
 def get_python_executable():
     """获取正确的Python解释器路径（FreeCAD中sys.executable指向FreeCAD.exe）"""
-    # sys.executable 如果是python则直接使用
     if 'python' in os.path.basename(sys.executable).lower():
         return sys.executable
 
-    # 在FreeCAD安装目录下查找python.exe
     freecad_dir = os.path.dirname(sys.executable)
     for name in ('python3.exe', 'python.exe', 'python'):
         candidate = os.path.join(freecad_dir, name)
         if os.path.isfile(candidate):
             return candidate
 
-    # bin子目录
     bin_dir = os.path.join(freecad_dir, 'bin')
     for name in ('python3.exe', 'python.exe', 'python'):
         candidate = os.path.join(bin_dir, name)
@@ -89,8 +87,9 @@ import shutil
 import queue
 import time
 
+
 class MessageQueue:
-    """线程安全的消息队列，用于将任务从WebSocket线程传递到主线程"""
+    """线程安全的消息队列"""
 
     def __init__(self):
         self.queue = queue.Queue()
@@ -118,6 +117,17 @@ class WebSocketPCBServer:
         self.clients = set()
         self.message_queue = MessageQueue()
         self.server_thread = None
+
+        # 双向交互状态
+        self.designator_map = {}       # designator → FreeCAD object label
+        self.label_map = {}            # FreeCAD object label → designator
+        self.last_positions = {}       # label → {x, y, z, yaw, pitch, roll}
+        self.designator_groups = {}   # designator → [label1, label2, ...] 同组对象一起移动
+        self.center_offset = {'x': 0, 'y': 0, 'z': 0}  # 居中偏移量
+        self.monitor_active = False
+        self.monitor_timer = None
+        self.last_update_source = None  # 防止循环更新: 'freecad' 或 None
+
         print(f"初始化WebSocket服务器 {host}:{port}")
 
     async def register_client(self, websocket, path=None):
@@ -129,7 +139,6 @@ class WebSocketPCBServer:
 
         print(f"客户端连接: {client_addr}")
 
-        # 与TS端 handleFreeCADMessage 中的 case 'connection_confirmed' 对应
         await websocket.send(json.dumps({
             "type": "connection_confirmed",
             "message": "成功连接到FreeCAD PCB导入器"
@@ -147,11 +156,24 @@ class WebSocketPCBServer:
         try:
             data = json.loads(message)
             message_type = data.get('type')
+            print(f"[WS] 收到消息 type={message_type}")
 
             if message_type == 'file_upload':
                 await self.handle_file_upload(websocket, data)
             elif message_type == 'ping':
                 await websocket.send(json.dumps({"type": "pong"}))
+            elif message_type == 'build_mapping':
+                self.handle_build_mapping(data)
+            elif message_type == 'position_update':
+                self.handle_position_update(data)
+            elif message_type == 'delete_object':
+                self.handle_delete_object(data)
+            elif message_type == 'cross_probe':
+                self.handle_cross_probe(data)
+            elif message_type == 'enable_monitor':
+                self.enable_monitor()
+            elif message_type == 'disable_monitor':
+                self.disable_monitor()
             else:
                 print(f"未知消息类型: {message_type}")
 
@@ -159,6 +181,8 @@ class WebSocketPCBServer:
             await self.send_error(websocket, "无效的JSON消息")
         except Exception as e:
             await self.send_error(websocket, f"消息处理错误: {str(e)}")
+
+    # ==================== 文件导入 ====================
 
     async def handle_file_upload(self, websocket, data):
         try:
@@ -196,19 +220,19 @@ class WebSocketPCBServer:
                 "message": "开始导入..."
             }))
 
-            # 将导入任务放入消息队列，由主线程处理
             import_task = {
                 'type': 'import_step',
                 'file_path': temp_file_path,
                 'temp_dir': temp_dir,
                 'filename': filename,
+                'sync': data.get('sync', False),
             }
             self.message_queue.put(import_task)
 
         except Exception as e:
             await self.send_error(websocket, f"文件处理错误: {str(e)}")
 
-    def import_step_file(self, file_path):
+    def import_step_file(self, file_path, sync=False):
         """在主线程中调用，导入STEP文件到FreeCAD"""
         try:
             import FreeCAD
@@ -216,6 +240,31 @@ class WebSocketPCBServer:
 
             print(f"导入STEP文件: {file_path}")
 
+            if sync and self.designator_map:
+                # 同步模式：清除旧对象，在同一文档中插入新模型
+                doc = FreeCAD.getActiveDocument()
+                if doc:
+                    obj_names = []
+                    for obj in list(doc.Objects):
+                        try:
+                            obj_names.append(obj.Name)
+                        except Exception:
+                            pass
+                    for name in obj_names:
+                        try:
+                            if doc.getObject(name) is not None:
+                                doc.removeObject(name)
+                        except Exception:
+                            pass
+                    ImportGui.insert(file_path, doc.Name)
+                    try:
+                        doc.recompute()
+                    except Exception as e:
+                        print(f"recompute 失败: {e}")
+                    print(f"同步更新完成，共 {len(doc.Objects)} 个对象")
+                    return True
+
+            # 首次导入：创建新文档
             ImportGui.open(file_path)
 
             doc = FreeCAD.ActiveDocument
@@ -280,17 +329,18 @@ class WebSocketPCBServer:
                     continue
 
             if not has_valid:
-                print("未找到可计算包围盒的对象")
                 return
 
             cx = (bb_min_x + bb_max_x) / 2
             cy = (bb_min_y + bb_max_y) / 2
             cz = (bb_min_z + bb_max_z) / 2
-            print(f"模型包围盒中心: ({cx:.2f}, {cy:.2f}, {cz:.2f})")
 
             if abs(cx) < 0.01 and abs(cy) < 0.01 and abs(cz) < 0.01:
-                print("模型已居中，无需移动")
+                self.center_offset = {'x': 0, 'y': 0, 'z': 0}
                 return
+
+            self.center_offset = {'x': cx, 'y': cy, 'z': cz}
+            print(f"居中偏移量: cx={cx:.2f} cy={cy:.2f} cz={cz:.2f}")
 
             for obj in doc.Objects:
                 if hasattr(obj, 'Placement'):
@@ -305,34 +355,485 @@ class WebSocketPCBServer:
         except Exception as e:
             print(f"居中处理失败（不影响导入）: {e}")
 
+    # ==================== 双向交互 ====================
+
+    def handle_build_mapping(self, data):
+        """建立 designator → FreeCAD 对象映射"""
+        components = data.get('components', [])
+        if not components:
+            return
+
+        self.message_queue.put({
+            'type': 'build_mapping',
+            'components': components
+        })
+
+    def do_build_mapping(self, components):
+        """在主线程中执行映射建立"""
+        try:
+            import FreeCAD
+
+            doc = FreeCAD.ActiveDocument
+            if not doc:
+                print("[映射] 没有活动文档")
+                self.send_to_clients({"type": "mapping_result", "mapping": []})
+                return
+
+            # 收集 FreeCAD 所有对象（含 label 和位置）
+            freecad_objects = []
+            for obj in doc.Objects:
+                try:
+                    info = {'label': obj.Label, 'name': obj.Name, 'x': 0, 'y': 0, 'z': 0}
+                    if hasattr(obj, 'Shape') and obj.Shape is not None and hasattr(obj.Shape, 'BoundBox'):
+                        bb = obj.Shape.BoundBox
+                        info['x'] = (bb.XMin + bb.XMax) / 2
+                        info['y'] = (bb.YMin + bb.YMax) / 2
+                        info['z'] = (bb.ZMin + bb.ZMax) / 2
+                    elif hasattr(obj, 'Placement'):
+                        p = obj.Placement.Base
+                        info['x'] = p.x
+                        info['y'] = p.y
+                        info['z'] = p.z
+                    freecad_objects.append(info)
+                except Exception:
+                    pass
+
+            # 打印调试信息
+            print(f"[映射] EDA 发送 {len(components)} 个元件:")
+            for c in components:
+                print(f"  EDA: {c['designator']} x={c.get('x','?')} y={c.get('y','?')} rot={c.get('rotation','?')}")
+            print(f"[映射] FreeCAD 有 {len(freecad_objects)} 个对象:")
+            for o in freecad_objects:
+                print(f"  FC: Label='{o['label']}' Name='{o['name']}' x={o['x']:.2f} y={o['y']:.2f} z={o['z']:.2f}")
+
+            self.designator_map.clear()
+            self.label_map.clear()
+            mapping = []
+            used_fc_objects = set()
+
+            # 第一轮：label 精确匹配（忽略大小写）
+            for comp in components:
+                designator = comp['designator']
+                for i, fc_obj in enumerate(freecad_objects):
+                    if i in used_fc_objects:
+                        continue
+                    if fc_obj['label'].upper() == designator.upper():
+                        self.designator_map[designator] = fc_obj['label']
+                        self.label_map[fc_obj['label']] = designator
+                        mapping.append({'designator': designator, 'freecadLabel': fc_obj['label']})
+                        used_fc_objects.add(i)
+                        break
+
+            # 第二轮：label 包含匹配（FC label 包含 designator，或反过来）
+            for comp in components:
+                designator = comp['designator']
+                if designator in self.designator_map:
+                    continue
+                desig_upper = designator.upper()
+                for i, fc_obj in enumerate(freecad_objects):
+                    if i in used_fc_objects:
+                        continue
+                    label_upper = fc_obj['label'].upper()
+                    if desig_upper in label_upper or label_upper in desig_upper:
+                        self.designator_map[designator] = fc_obj['label']
+                        self.label_map[fc_obj['label']] = designator
+                        mapping.append({'designator': designator, 'freecadLabel': fc_obj['label']})
+                        used_fc_objects.add(i)
+                        break
+
+            # 第三轮：位置匹配（EDA 坐标是 mil，FreeCAD 是 mm）
+            # EDA mil → mm: 乘以 0.0254
+            MIL_TO_MM = 0.0254
+            TOLERANCE_MM = 2.0  # 2mm 容忍度
+            for comp in components:
+                designator = comp['designator']
+                if designator in self.designator_map:
+                    continue
+                eda_x_mm = comp.get('x', 0) * MIL_TO_MM
+                eda_y_mm = comp.get('y', 0) * MIL_TO_MM
+                best_match = None
+                best_dist = float('inf')
+                for i, fc_obj in enumerate(freecad_objects):
+                    if i in used_fc_objects:
+                        continue
+                    dist = ((fc_obj['x'] - eda_x_mm) ** 2 + (fc_obj['y'] - eda_y_mm) ** 2) ** 0.5
+                    if dist < TOLERANCE_MM and dist < best_dist:
+                        best_dist = dist
+                        best_match = i
+                if best_match is not None:
+                    fc_obj = freecad_objects[best_match]
+                    self.designator_map[designator] = fc_obj['label']
+                    self.label_map[fc_obj['label']] = designator
+                    mapping.append({'designator': designator, 'freecadLabel': fc_obj['label']})
+                    used_fc_objects.add(best_match)
+                    print(f"  [位置匹配] {designator} -> '{fc_obj['label']}' (dist={best_dist:.2f}mm)")
+
+            print(f"[映射] 完成: {len(mapping)}/{len(components)} 个元件匹配")
+
+            # 构建同组对象：同一位置的对象归为一组，移动时一起移
+            self.designator_groups.clear()
+            TOLERANCE = 1.0  # mm
+            for designator, main_label in self.designator_map.items():
+                # 找到主对象的中心位置
+                main_pos = None
+                for o in freecad_objects:
+                    if o['label'] == main_label:
+                        main_pos = (o['x'], o['y'])
+                        break
+                if not main_pos:
+                    continue
+                # 找所有同位置的对象（包括自己）
+                group = []
+                for o in freecad_objects:
+                    dist = ((o['x'] - main_pos[0]) ** 2 + (o['y'] - main_pos[1]) ** 2) ** 0.5
+                    if dist < TOLERANCE:
+                        group.append(o['label'])
+                        self.label_map[o['label']] = designator
+                self.designator_groups[designator] = group
+                if len(group) > 1:
+                    print(f"  [分组] {designator}: {len(group)} 个对象 -> {group}")
+
+            # 记录初始位置
+            self.snapshot_positions()
+
+            self.send_to_clients({"type": "mapping_result", "mapping": mapping})
+
+        except Exception as e:
+            print(f"建立映射失败: {e}")
+            import traceback
+            traceback.print_exc()
+            self.send_to_clients({"type": "mapping_result", "mapping": []})
+
+    def handle_position_update(self, data):
+        """EDA → FreeCAD 位置更新"""
+        designator = data.get('designator')
+        if not designator:
+            return
+        print(f"[位置更新] 收到 EDA 位置更新: {designator} x={data.get('x')} y={data.get('y')} rot={data.get('rotation')}")
+        self.message_queue.put({
+            'type': 'position_update',
+            'designator': designator,
+            'x': data.get('x', 0),
+            'y': data.get('y', 0),
+            'rotation': data.get('rotation', 0)
+        })
+
+    def do_position_update(self, designator, x, y, rotation):
+        """在主线程中更新对象位置（x/y 是 EDA 原始 mm 坐标，需减去居中偏移）"""
+        try:
+            import FreeCAD
+            import FreeCAD as FC
+
+            group = self.designator_groups.get(designator, [])
+            if not group:
+                print(f"[位置更新] 未找到 designator={designator} 的分组")
+                return
+
+            doc = FreeCAD.ActiveDocument
+            if not doc:
+                return
+
+            # 标记来源为 EDA，防止循环
+            self.last_update_source = 'eda'
+
+            # EDA 坐标减去居中偏移量，得到 FreeCAD 坐标
+            fc_x = x - self.center_offset['x']
+            fc_y = y - self.center_offset['y']
+
+            # 获取主对象的旧位置，计算偏移量
+            main_label = self.designator_map.get(designator)
+            main_obj = None
+            for o in doc.Objects:
+                if o.Label == main_label and hasattr(o, 'Placement'):
+                    main_obj = o
+                    break
+
+            if not main_obj:
+                return
+
+            old_p = main_obj.Placement
+            dx = fc_x - old_p.Base.x
+            dy = fc_y - old_p.Base.y
+            old_yaw = old_p.Rotation.getYawPitchRoll()[0]
+            d_rot = rotation - old_yaw
+
+            new_rot = FC.Rotation(FC.Vector(0, 0, 1), rotation)
+
+            print(f"[位置更新] {designator}: EDA({x:.2f},{y:.2f}) FC({fc_x:.2f},{fc_y:.2f}) dx={dx:.2f} dy={dy:.2f}, {len(group)} 个对象")
+
+            # 移动同组所有对象
+            for label in group:
+                for o in doc.Objects:
+                    if o.Label == label and hasattr(o, 'Placement'):
+                        p = o.Placement
+                        if label == main_label:
+                            o.Placement = FC.Placement(FC.Vector(fc_x, fc_y, p.Base.z), new_rot)
+                        else:
+                            o.Placement = FC.Placement(
+                                FC.Vector(p.Base.x + dx, p.Base.y + dy, p.Base.z),
+                                FC.Rotation(FC.Vector(0, 0, 1), p.Rotation.getYawPitchRoll()[0] + d_rot)
+                            )
+                        break
+
+            # 更新快照
+            self.snapshot_positions()
+
+        except Exception as e:
+            print(f"更新位置失败: {e}")
+        finally:
+            self.last_update_source = None
+
+    def handle_delete_object(self, data):
+        """EDA → FreeCAD 删除对象"""
+        designator = data.get('designator')
+        if not designator:
+            return
+        self.message_queue.put({
+            'type': 'delete_object',
+            'designator': designator
+        })
+
+    def do_delete_object(self, designator):
+        """在主线程中删除对象及其同组对象"""
+        try:
+            import FreeCAD
+
+            group = self.designator_groups.get(designator, [])
+            label = self.designator_map.get(designator)
+            if not label and not group:
+                return
+
+            doc = FreeCAD.ActiveDocument
+            if not doc:
+                return
+
+            # 删除同组所有对象
+            labels_to_delete = set(group) if group else {label}
+            print(f"[删除] {designator}: 删除 {len(labels_to_delete)} 个对象")
+            for lbl in labels_to_delete:
+                for obj in list(doc.Objects):
+                    if obj.Label == lbl:
+                        try:
+                            doc.removeObject(obj.Name)
+                        except Exception:
+                            pass
+                        break
+
+            # 清除映射
+            self.designator_map.pop(designator, None)
+            for lbl in labels_to_delete:
+                self.label_map.pop(lbl, None)
+                self.last_positions.pop(lbl, None)
+            self.designator_groups.pop(designator, None)
+
+        except Exception as e:
+            print(f"删除对象失败: {e}")
+
+    def handle_cross_probe(self, data):
+        """EDA → FreeCAD 交叉定位"""
+        designator = data.get('designator')
+        if not designator:
+            return
+        self.message_queue.put({
+            'type': 'cross_probe',
+            'designator': designator
+        })
+
+    def do_cross_probe(self, designator):
+        """在主线程中定位到指定对象"""
+        try:
+            import FreeCAD
+            import FreeCADGui
+
+            label = self.designator_map.get(designator)
+            if not label:
+                return
+
+            doc = FreeCAD.ActiveDocument
+            if not doc:
+                return
+
+            obj = None
+            for o in doc.Objects:
+                if o.Label == label:
+                    obj = o
+                    break
+
+            if not obj:
+                return
+
+            # 选中对象并 fit view
+            gui_doc = FreeCADGui.getDocument(doc.Name)
+            if gui_doc:
+                FreeCADGui.Selection.clearSelection()
+                FreeCADGui.Selection.addSelection(obj)
+
+                # Fit view 到选中对象
+                try:
+                    FreeCADGui.SendMsgToActiveView("ViewFit")
+                except Exception as e:
+                    print(f"fit view 失败: {e}")
+
+        except Exception as e:
+            print(f"交叉定位失败: {e}")
+
+    # ==================== 位置监听（FreeCAD → EDA）====================
+
+    def enable_monitor(self):
+        """启动位置监听"""
+        if self.monitor_active:
+            return
+        self.monitor_active = True
+        self.snapshot_positions()
+        print(f"FreeCAD端位置监听已启动，已记录 {len(self.last_positions)} 个对象初始位置")
+
+    def disable_monitor(self):
+        """停止位置监听"""
+        self.monitor_active = False
+        self.designator_groups.clear()
+        print("FreeCAD端位置监听已停止")
+
+    def snapshot_positions(self):
+        """记录当前所有已映射对象的位置"""
+        try:
+            import FreeCAD
+
+            doc = FreeCAD.ActiveDocument
+            if not doc:
+                return
+
+            for label in self.label_map:
+                for obj in doc.Objects:
+                    if obj.Label == label and hasattr(obj, 'Placement'):
+                        p = obj.Placement
+                        yaw, pitch, roll = p.Rotation.getYawPitchRoll()
+                        self.last_positions[label] = {
+                            'x': p.Base.x,
+                            'y': p.Base.y,
+                            'z': p.Base.z,
+                            'yaw': yaw,
+                            'pitch': pitch,
+                            'roll': roll
+                        }
+                        break
+        except Exception:
+            pass
+
+    def check_position_changes(self):
+        """检查对象位置变化（由 QTimer 定时调用），只发主对象的通知"""
+        if not self.monitor_active or self.last_update_source is not None:
+            return
+
+        try:
+            import FreeCAD
+
+            doc = FreeCAD.ActiveDocument
+            if not doc:
+                return
+
+            notified = set()  # 避免同一 designator 重复通知
+            for label, designator in self.label_map.items():
+                if designator in notified:
+                    continue
+                for obj in doc.Objects:
+                    if obj.Label == label and hasattr(obj, 'Placement'):
+                        p = obj.Placement
+                        yaw, pitch, roll = p.Rotation.getYawPitchRoll()
+                        current = {
+                            'x': p.Base.x,
+                            'y': p.Base.y,
+                            'z': p.Base.z,
+                            'yaw': yaw,
+                            'pitch': pitch,
+                            'roll': roll
+                        }
+                        last = self.last_positions.get(label)
+                        if last and current != last:
+                            # 只用主对象的位置发通知
+                            main_label = self.designator_map.get(designator)
+                            if label == main_label:
+                                # FreeCAD 坐标加上居中偏移，还原为 EDA 坐标（mm）
+                                eda_x = current['x'] + self.center_offset['x']
+                                eda_y = current['y'] + self.center_offset['y']
+                                print(f"[位置监听] {designator}: ({last['x']:.2f}, {last['y']:.2f}) -> ({current['x']:.2f}, {current['y']:.2f}) mm, EDA坐标=({eda_x:.2f}, {eda_y:.2f})")
+                                self.send_to_clients({
+                                    "type": "position_update_from_freecad",
+                                    "designator": designator,
+                                    "x": eda_x,
+                                    "y": eda_y,
+                                    "rotation": yaw
+                                })
+                                notified.add(designator)
+                            self.last_positions[label] = current
+                        break
+        except Exception as e:
+            print(f"检查位置变化失败: {e}")
+
+    # ==================== 消息队列处理 ====================
+
     def process_message_queue(self):
         """处理消息队列中的任务（在FreeCAD主线程中定时调用）"""
         messages = self.message_queue.get_all()
 
         for msg in messages:
             try:
-                if msg['type'] == 'import_step':
-                    success = self.import_step_file(msg['file_path'])
-                    if not success:
-                        print(f"STEP导入失败: {msg['filename']}")
+                msg_type = msg.get('type')
+
+                if msg_type == 'import_step':
+                    success = self.import_step_file(msg['file_path'], msg.get('sync', False))
+                    result_msg = {
+                        "type": "import_complete" if success else "error",
+                        "details": "成功导入STEP模型" if success else None,
+                        "message": "STEP导入失败" if not success else None
+                    }
+                    self.send_to_clients(result_msg)
+
+                elif msg_type == 'build_mapping':
+                    self.do_build_mapping(msg['components'])
+
+                elif msg_type == 'position_update':
+                    self.do_position_update(msg['designator'], msg['x'], msg['y'], msg['rotation'])
+
+                elif msg_type == 'delete_object':
+                    self.do_delete_object(msg['designator'])
+
+                elif msg_type == 'cross_probe':
+                    self.do_cross_probe(msg['designator'])
+
             except Exception as e:
-                print(f"处理导入任务失败: {e}")
+                print(f"处理任务失败: {e}")
                 import traceback
                 traceback.print_exc()
             finally:
                 # 清理临时文件
-                try:
-                    temp_dir = msg.get('temp_dir')
-                    if temp_dir and os.path.exists(temp_dir):
-                        shutil.rmtree(temp_dir, ignore_errors=True)
-                except Exception as e:
-                    print(f"清理临时文件失败: {e}")
+                if msg.get('type') == 'import_step':
+                    try:
+                        temp_dir = msg.get('temp_dir')
+                        if temp_dir and os.path.exists(temp_dir):
+                            shutil.rmtree(temp_dir, ignore_errors=True)
+                    except Exception as e:
+                        print(f"清理临时文件失败: {e}")
+
+    # ==================== 通信工具 ====================
 
     async def send_error(self, websocket, message):
         try:
             await websocket.send(json.dumps({"type": "error", "message": message}))
         except Exception:
             pass
+
+    def send_to_clients(self, message_dict):
+        """从主线程安全地向所有客户端发送消息"""
+        if not self.loop or not self.clients:
+            return
+        try:
+            data = json.dumps(message_dict)
+            for client in list(self.clients):
+                asyncio.run_coroutine_threadsafe(client.send(data), self.loop)
+        except Exception as e:
+            print(f"发送消息到客户端失败: {e}")
+
+    # ==================== 服务器生命周期 ====================
 
     def start_server(self):
         if self.is_running:
@@ -428,10 +929,17 @@ if is_freecad_environment():
             QTimer = None
 
     if QTimer:
+        # 消息队列处理定时器
         timer = QTimer()
         timer.timeout.connect(server.process_message_queue)
         timer.start(100)
-        print("已注册主线程定时器（100ms轮询）")
+        print("已注册主线程定时器（100ms轮询消息队列）")
+
+        # 位置监听定时器（500ms 检查对象位置变化）
+        monitor_timer = QTimer()
+        monitor_timer.timeout.connect(server.check_position_changes)
+        monitor_timer.start(500)
+        print("已注册位置监听定时器（500ms轮询）")
     else:
         print("警告: 无法导入QTimer，导入操作可能无法在主线程中执行")
 else:
