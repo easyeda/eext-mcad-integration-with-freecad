@@ -127,7 +127,9 @@ class WebSocketPCBServer:
         self.center_offset = {'x': 0, 'y': 0, 'z': 0}  # 居中偏移量
         self.monitor_active = False
         self.monitor_timer = None
-        self.last_update_source = None  # 防止循环更新: 'freecad' 或 None
+        self.last_update_source = None  # 防止循环更新: 'eda' 或 None
+        self.last_selected_labels = set()  # 上次选中的对象 label 集合
+        self.last_freecad_move_time = 0   # 用户在 FreeCAD 中最后操作的时间戳
 
         print(f"初始化WebSocket服务器 {host}:{port}")
 
@@ -139,6 +141,14 @@ class WebSocketPCBServer:
             if key.upper() == designator.upper():
                 return key
         return None
+
+    @staticmethod
+    def _position_equal(a, b, pos_tol=0.01, rot_tol=0.1):
+        """比较两个位置是否相同（带容差），避免浮点漂移触发误检测"""
+        return (abs(a['x'] - b['x']) < pos_tol and
+                abs(a['y'] - b['y']) < pos_tol and
+                abs(a['z'] - b['z']) < pos_tol and
+                abs(a['yaw'] - b['yaw']) < rot_tol)
 
     async def register_client(self, websocket, path=None):
         self.clients.add(websocket)
@@ -166,8 +176,6 @@ class WebSocketPCBServer:
         try:
             data = json.loads(message)
             message_type = data.get('type')
-            print(f"[WS] 收到消息 type={message_type}")
-
             if message_type == 'file_upload':
                 await self.handle_file_upload(websocket, data)
             elif message_type == 'ping':
@@ -183,9 +191,9 @@ class WebSocketPCBServer:
             elif message_type == 'rename_designator':
                 self.handle_rename_designator(data)
             elif message_type == 'enable_monitor':
-                self.enable_monitor()
+                self.message_queue.put({'type': 'enable_monitor'})
             elif message_type == 'disable_monitor':
-                self.disable_monitor()
+                self.message_queue.put({'type': 'disable_monitor'})
             else:
                 print(f"未知消息类型: {message_type}")
 
@@ -436,12 +444,13 @@ class WebSocketPCBServer:
                         used_fc_objects.add(i)
                         break
 
-            # 第二轮：label 单词边界匹配（R1 匹配 "R1_body" 但不匹配 "R10"）
+            # 第二轮：label 单词边界匹配（R5 匹配 "R5~R0402XX" 但不匹配 "R50"）
             for comp in components:
                 designator = comp['designator']
                 if designator in self.designator_map:
                     continue
-                pattern = re.compile(r'(^|[-_.\s])' + re.escape(designator) + r'($|[-_.\s])', re.IGNORECASE)
+                # 前面不能是字母或数字，后面不能是数字（防止 R1 匹配 R10）
+                pattern = re.compile(r'(?<![A-Za-z0-9])' + re.escape(designator) + r'(?![0-9])', re.IGNORECASE)
                 for i, fc_obj in enumerate(freecad_objects):
                     if i in used_fc_objects:
                         continue
@@ -545,15 +554,17 @@ class WebSocketPCBServer:
             import FreeCAD
             import FreeCAD as FC
 
+            # 如果用户最近在 FreeCAD 中操作过（1秒内），丢弃 EDA 的反馈更新
+            if time.time() - self.last_freecad_move_time < 1.0:
+                return
+
             resolved = self._resolve_designator(designator)
             if not resolved:
-                print(f"[位置更新] 未找到 designator={designator} 的映射")
                 return
             designator = resolved
 
             group = self.designator_groups.get(designator, [])
             if not group:
-                print(f"[位置更新] 未找到 designator={designator} 的分组")
                 return
 
             doc = FreeCAD.ActiveDocument
@@ -563,11 +574,9 @@ class WebSocketPCBServer:
             # 标记来源为 EDA，防止循环
             self.last_update_source = 'eda'
 
-            # EDA 坐标减去居中偏移量，得到 FreeCAD 坐标
             fc_x = x - self.center_offset['x']
             fc_y = y - self.center_offset['y']
 
-            # 获取主对象的旧位置，计算偏移量
             main_label = self.designator_map.get(designator)
             main_obj = None
             for o in doc.Objects:
@@ -830,13 +839,18 @@ class WebSocketPCBServer:
                             'roll': roll
                         }
                         break
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[位置快照] 记录位置失败: {e}")
 
     def check_position_changes(self):
         """检查对象位置变化（由 QTimer 定时调用），只发主对象的通知"""
         if not self.monitor_active or self.last_update_source is not None:
             return
+
+        # 调试日志：首次调用时打印状态
+        if not hasattr(self, '_check_debug_printed'):
+            self._check_debug_printed = True
+            print(f"[位置监听] 监听已激活，label_map有 {len(self.label_map)} 个对象，last_positions有 {len(self.last_positions)} 个快照")
 
         try:
             import FreeCAD
@@ -862,7 +876,7 @@ class WebSocketPCBServer:
                             'roll': roll
                         }
                         last = self.last_positions.get(label)
-                        if last and current != last:
+                        if last and not self._position_equal(current, last):
                             # 只用主对象的位置发通知
                             main_label = self.designator_map.get(designator)
                             if label == main_label:
@@ -878,10 +892,77 @@ class WebSocketPCBServer:
                                     "rotation": yaw
                                 })
                                 notified.add(designator)
+                                self.last_freecad_move_time = time.time()
                             self.last_positions[label] = current
                         break
         except Exception as e:
             print(f"检查位置变化失败: {e}")
+
+    def check_selection_changes(self):
+        """检查 FreeCAD 选中对象变化，发送交叉定位到 EDA"""
+        if not self.monitor_active:
+            return
+
+        try:
+            import FreeCADGui
+
+            sel = FreeCADGui.Selection.getSelection()
+            current_labels = set()
+            for obj in sel:
+                if hasattr(obj, 'Label'):
+                    current_labels.add(obj.Label)
+
+            # 检测新选中的对象
+            new_labels = current_labels - self.last_selected_labels
+            for label in new_labels:
+                designator = self.label_map.get(label)
+                if designator:
+                    print(f"[选中监听] FreeCAD选中 {label} -> {designator}，发送交叉定位到EDA")
+                    self.send_to_clients({
+                        "type": "cross_probe_from_freecad",
+                        "designator": designator
+                    })
+
+            self.last_selected_labels = current_labels
+
+        except Exception as e:
+            print(f"[选中监听] 检查选中变化失败: {e}")
+
+    def check_deleted_objects(self):
+        """检查 FreeCAD 中已删除的映射对象，通知 EDA 同步删除"""
+        if not self.monitor_active:
+            return
+
+        try:
+            import FreeCAD
+
+            doc = FreeCAD.ActiveDocument
+            if not doc:
+                return
+
+            existing_labels = {obj.Label for obj in doc.Objects}
+
+            # 只检查主对象（designator_map 中的 label），辅助对象丢失不影响
+            deleted = []
+            for designator, main_label in list(self.designator_map.items()):
+                if main_label not in existing_labels:
+                    deleted.append(designator)
+
+            for designator in deleted:
+                main_label = self.designator_map.pop(designator)
+                # 清理该 designator 的所有关联数据
+                group = self.designator_groups.pop(designator, [])
+                for l in group:
+                    self.label_map.pop(l, None)
+                    self.last_positions.pop(l, None)
+                print(f"[删除监听] FreeCAD删除对象 {main_label} -> {designator}，通知EDA删除")
+                self.send_to_clients({
+                    "type": "delete_from_freecad",
+                    "designator": designator
+                })
+
+        except Exception as e:
+            print(f"[删除监听] 检查删除失败: {e}")
 
     # ==================== 消息队列处理 ====================
 
@@ -917,6 +998,12 @@ class WebSocketPCBServer:
                 elif msg_type == 'cross_probe':
                     self.do_cross_probe(msg['designator'])
 
+                elif msg_type == 'enable_monitor':
+                    self.enable_monitor()
+
+                elif msg_type == 'disable_monitor':
+                    self.disable_monitor()
+
             except Exception as e:
                 print(f"处理任务失败: {e}")
                 import traceback
@@ -941,14 +1028,22 @@ class WebSocketPCBServer:
 
     def send_to_clients(self, message_dict):
         """从主线程安全地向所有客户端发送消息"""
-        if not self.loop or not self.clients:
+        if not self.loop:
+            print(f"[发送] 失败: event loop 不存在")
+            return
+        if not self.clients:
+            print(f"[发送] 失败: 没有已连接的客户端 (clients为空)")
             return
         try:
             data = json.dumps(message_dict)
+            msg_type = message_dict.get('type', '?')
             for client in list(self.clients):
-                asyncio.run_coroutine_threadsafe(client.send(data), self.loop)
+                future = asyncio.run_coroutine_threadsafe(client.send(data), self.loop)
+            print(f"[发送] 已提交到event loop: type={msg_type}, 数据长度={len(data)}, 客户端数={len(self.clients)}")
         except Exception as e:
             print(f"发送消息到客户端失败: {e}")
+            import traceback
+            traceback.print_exc()
 
     # ==================== 服务器生命周期 ====================
 
@@ -1055,8 +1150,10 @@ if is_freecad_environment():
         # 位置监听定时器（500ms 检查对象位置变化）
         monitor_timer = QTimer()
         monitor_timer.timeout.connect(server.check_position_changes)
+        monitor_timer.timeout.connect(server.check_selection_changes)
+        monitor_timer.timeout.connect(server.check_deleted_objects)
         monitor_timer.start(500)
-        print("已注册位置监听定时器（500ms轮询）")
+        print("已注册位置监听定时器（500ms轮询位置+选中+删除）")
     else:
         print("警告: 无法导入QTimer，导入操作可能无法在主线程中执行")
 else:
