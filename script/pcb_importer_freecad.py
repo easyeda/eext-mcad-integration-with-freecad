@@ -462,23 +462,34 @@ class WebSocketPCBServer:
                         break
 
             # 第三轮：位置匹配（EDA 已发送 mm 坐标，需补偿居中偏移）
+            # 尝试多种坐标轴映射：EDA(X,Y) 可能对应 FreeCAD (X,Y), (X,Z), (X,-Y) 等
             TOLERANCE_MM = 2.0  # 2mm 容忍度
-            cx, cy = self.center_offset['x'], self.center_offset['y']
+            cx = self.center_offset['x']
+            cy = self.center_offset['y']
+            cz = self.center_offset['z']
             for comp in components:
                 designator = comp['designator']
                 if designator in self.designator_map:
                     continue
-                eda_x_mm = comp.get('x', 0)  # EDA 已转 mm，不再乘 MIL_TO_MM
+                eda_x_mm = comp.get('x', 0)
                 eda_y_mm = comp.get('y', 0)
                 best_match = None
                 best_dist = float('inf')
                 for i, fc_obj in enumerate(freecad_objects):
                     if i in used_fc_objects:
                         continue
-                    # FC 对象位置 = 原始位置 - 居中偏移，所以要加回偏移再比较
-                    fc_real_x = fc_obj['x'] + cx
-                    fc_real_y = fc_obj['y'] + cy
-                    dist = ((fc_real_x - eda_x_mm) ** 2 + (fc_real_y - eda_y_mm) ** 2) ** 0.5
+                    # FC 对象位置 = 原始位置 - 居中偏移，加回偏移得到原始坐标
+                    rx = fc_obj['x'] + cx
+                    ry = fc_obj['y'] + cy
+                    rz = fc_obj['z'] + cz
+                    # 尝试多种轴映射，取最小距离
+                    dists = [
+                        ((rx - eda_x_mm) ** 2 + (ry - eda_y_mm) ** 2) ** 0.5,   # XY
+                        ((rx - eda_x_mm) ** 2 + (rz - eda_y_mm) ** 2) ** 0.5,   # XZ (板子在XZ平面)
+                        ((rx - eda_x_mm) ** 2 + (-ry - eda_y_mm) ** 2) ** 0.5,  # X,-Y
+                        ((rx - eda_x_mm) ** 2 + (-rz - eda_y_mm) ** 2) ** 0.5,  # X,-Z
+                    ]
+                    dist = min(dists)
                     if dist < TOLERANCE_MM and dist < best_dist:
                         best_dist = dist
                         best_match = i
@@ -813,8 +824,12 @@ class WebSocketPCBServer:
     def disable_monitor(self):
         """停止位置监听"""
         self.monitor_active = False
+        self.designator_map.clear()
+        self.label_map.clear()
         self.designator_groups.clear()
-        print("FreeCAD端位置监听已停止")
+        self.last_positions.clear()
+        self.center_offset = {'x': 0, 'y': 0, 'z': 0}
+        print("FreeCAD端位置监听已停止，所有映射表已清理")
 
     def snapshot_positions(self):
         """记录当前所有已映射对象的位置"""
