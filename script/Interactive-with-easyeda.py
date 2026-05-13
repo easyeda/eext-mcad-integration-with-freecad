@@ -87,6 +87,7 @@ import tempfile
 import shutil
 import queue
 import time
+import base64
 
 
 class MessageQueue:
@@ -106,6 +107,40 @@ class MessageQueue:
             except queue.Empty:
                 break
         return messages
+
+
+class ChunkedUploadSession:
+    """管理单个分片上传会话"""
+    def __init__(self, session_id, filename, total_size, total_chunks, temp_dir):
+        self.session_id = session_id
+        self.filename = filename
+        self.total_size = total_size
+        self.total_chunks = total_chunks
+        self.temp_dir = temp_dir
+        self.temp_file_path = os.path.join(temp_dir, filename)
+        self.file_handle = open(self.temp_file_path, 'wb')
+        self.received_chunks = 0
+        self.received_bytes = 0
+        self.start_time = time.time()
+
+    def write_chunk(self, index, chunk_data):
+        self.file_handle.write(chunk_data)
+        self.received_chunks += 1
+        self.received_bytes += len(chunk_data)
+
+    def finish(self):
+        self.file_handle.close()
+
+    def cleanup(self):
+        try:
+            self.file_handle.close()
+        except Exception:
+            pass
+        try:
+            if self.temp_dir and os.path.exists(self.temp_dir):
+                shutil.rmtree(self.temp_dir, ignore_errors=True)
+        except Exception:
+            pass
 
 
 class WebSocketPCBServer:
@@ -130,6 +165,11 @@ class WebSocketPCBServer:
         self.last_update_source = None  # 防止循环更新: 'eda' 或 None
         self.last_selected_labels = set()  # 上次选中的对象 label 集合
         self.last_freecad_move_time = 0   # 用户在 FreeCAD 中最后操作的时间戳
+
+        # 分片上传状态
+        self.active_uploads = {}          # session_id → ChunkedUploadSession
+        self.import_in_progress = False
+        self.import_start_time = 0
 
         print(f"初始化WebSocket服务器 {host}:{port}")
 
@@ -178,6 +218,10 @@ class WebSocketPCBServer:
             message_type = data.get('type')
             if message_type == 'file_upload':
                 await self.handle_file_upload(websocket, data)
+            elif message_type == 'file_upload_start':
+                await self.handle_upload_start(websocket, data)
+            elif message_type == 'file_upload_chunk':
+                await self.handle_upload_chunk(websocket, data)
             elif message_type == 'ping':
                 await websocket.send(json.dumps({"type": "pong"}))
             elif message_type == 'build_mapping':
@@ -251,6 +295,85 @@ class WebSocketPCBServer:
 
         except Exception as e:
             await self.send_error(websocket, f"文件处理错误: {str(e)}")
+
+    async def handle_upload_start(self, websocket, data):
+        """处理分片上传开始请求"""
+        try:
+            session_id = data.get('sessionId')
+            filename = data.get('filename')
+            total_size = data.get('totalSize')
+            total_chunks = data.get('totalChunks')
+
+            if not all([session_id, filename, total_size, total_chunks]):
+                await self.send_error(websocket, "分片上传参数不完整")
+                return
+
+            # 清理同一客户端之前的上传会话
+            old_session_id = getattr(self, '_last_upload_session', None)
+            if old_session_id and old_session_id in self.active_uploads:
+                self.active_uploads[old_session_id].cleanup()
+                del self.active_uploads[old_session_id]
+            self._last_upload_session = session_id
+
+            temp_dir = tempfile.mkdtemp(prefix="pcb_step_")
+            session = ChunkedUploadSession(session_id, filename, total_size, total_chunks, temp_dir)
+            self.active_uploads[session_id] = session
+
+            print(f"[分片上传] 开始: {filename}, 总大小={total_size}, 分片数={total_chunks}")
+            await websocket.send(json.dumps({
+                "type": "upload_started",
+                "sessionId": session_id
+            }))
+        except Exception as e:
+            await self.send_error(websocket, f"启动上传失败: {str(e)}")
+
+    async def handle_upload_chunk(self, websocket, data):
+        """处理单个分片数据"""
+        try:
+            session_id = data.get('sessionId')
+            index = data.get('index')
+            chunk_b64 = data.get('data')
+
+            session = self.active_uploads.get(session_id)
+            if not session:
+                await self.send_error(websocket, "无效的上传会话")
+                return
+
+            chunk_bytes = base64.b64decode(chunk_b64)
+            session.write_chunk(index, chunk_bytes)
+
+            progress = int(session.received_bytes / session.total_size * 100)
+            await websocket.send(json.dumps({
+                "type": "chunk_received",
+                "sessionId": session_id,
+                "index": index,
+                "received": session.received_bytes,
+                "total": session.total_size
+            }))
+
+            # 所有分片已接收完成
+            if session.received_chunks >= session.total_chunks:
+                session.finish()
+                print(f"[分片上传] 完成: {session.filename}, {session.received_bytes} bytes, 耗时{time.time()-session.start_time:.1f}s")
+
+                await websocket.send(json.dumps({
+                    "type": "upload_complete",
+                    "sessionId": session_id,
+                    "message": "文件上传完成，正在导入到FreeCAD..."
+                }))
+
+                import_task = {
+                    'type': 'import_step',
+                    'file_path': session.temp_file_path,
+                    'temp_dir': session.temp_dir,
+                    'filename': session.filename,
+                    'sync': data.get('sync', False),
+                    'session_id': session_id,
+                }
+                self.message_queue.put(import_task)
+                del self.active_uploads[session_id]
+        except Exception as e:
+            await self.send_error(websocket, f"分片处理错误: {str(e)}")
 
     def import_step_file(self, file_path, sync=False):
         """在主线程中调用，导入STEP文件到FreeCAD"""
@@ -997,11 +1120,32 @@ class WebSocketPCBServer:
                 msg_type = msg.get('type')
 
                 if msg_type == 'import_step':
+                    self.import_in_progress = True
+                    self.import_start_time = time.time()
+                    session_id = msg.get('session_id')
+
+                    # 通知客户端导入开始
+                    self.send_to_clients({
+                        "type": "import_started",
+                        "sessionId": session_id,
+                    })
+
+                    # 启动心跳线程，在主线程被 ImportGui 阻塞期间持续发送进度
+                    heartbeat_thread = threading.Thread(
+                        target=self._import_heartbeat,
+                        args=(session_id,),
+                        daemon=True
+                    )
+                    heartbeat_thread.start()
+
                     success = self.import_step_file(msg['file_path'], msg.get('sync', False))
+
+                    self.import_in_progress = False
                     result_msg = {
                         "type": "import_complete" if success else "error",
                         "details": "成功导入STEP模型" if success else None,
-                        "message": "STEP导入失败" if not success else None
+                        "message": "STEP导入失败" if not success else None,
+                        "sessionId": session_id,
                     }
                     self.send_to_clients(result_msg)
 
@@ -1041,6 +1185,17 @@ class WebSocketPCBServer:
                         print(f"清理临时文件失败: {e}")
 
     # ==================== 通信工具 ====================
+
+    def _import_heartbeat(self, session_id):
+        """后台线程：在导入期间每2秒向客户端发送进度心跳"""
+        while self.import_in_progress:
+            elapsed = int((time.time() - self.import_start_time) * 1000)
+            self.send_to_clients({
+                "type": "import_progress",
+                "sessionId": session_id,
+                "elapsed_ms": elapsed,
+            })
+            time.sleep(2)
 
     async def send_error(self, websocket, message):
         try:
@@ -1084,7 +1239,7 @@ class WebSocketPCBServer:
                         self.register_client,
                         self.host,
                         self.port,
-                        max_size=100 * 1024 * 1024,
+                        max_size=10 * 1024 * 1024,
                         ping_interval=None,
                         ping_timeout=None,
                     )

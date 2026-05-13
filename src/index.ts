@@ -8,6 +8,9 @@ const MIL_TO_MM = 0.0254;
 const MM_TO_MIL = 1 / 0.0254;
 
 let isExporting = false;
+let activeUploadSessionId: string | null = null;
+
+const CHUNK_SIZE = 512 * 1024; // 512KB per chunk
 const STORAGE_KEY_BIDIRECTIONAL = 'freecad_bidirectional';
 
 function isBidirectionalEnabled(): boolean {
@@ -97,11 +100,30 @@ async function handleFreeCADMessage(event: MessageEvent<any>): Promise<void> {
 			case 'upload_progress':
 				eda.sys_Message.showToastMessage(eda.sys_I18n.text('处理中 ${1}%', undefined, undefined, message.progress), ESYS_ToastMessageType.INFO);
 				break;
+			case 'upload_started':
+				console.log('[上传] 服务端已接受分片上传, sessionId=' + message.sessionId);
+				break;
+			case 'chunk_received':
+				if (activeUploadSessionId === message.sessionId) {
+					const pct = Math.round(message.received / message.total * 100);
+					console.log('[上传] 分片 ' + message.index + ' 已确认, 进度 ' + pct + '%');
+				}
+				break;
 			case 'upload_complete':
 				eda.sys_Message.showToastMessage(eda.sys_I18n.text('文件上传完成，正在导入到FreeCAD...'), ESYS_ToastMessageType.SUCCESS);
 				break;
+			case 'import_started':
+				eda.sys_Message.showToastMessage(eda.sys_I18n.text('正在导入STEP文件到FreeCAD...'), ESYS_ToastMessageType.INFO);
+				break;
+			case 'import_progress':
+				if (activeUploadSessionId === message.sessionId) {
+					const sec = Math.round(message.elapsed_ms / 1000);
+					console.log('[导入] 进行中, 已耗时 ' + sec + 's');
+				}
+				break;
 			case 'import_complete':
 				isExporting = false;
+				activeUploadSessionId = null;
 				eda.sys_Message.showToastMessage(eda.sys_I18n.text('PCB导入完成: ${1}', undefined, undefined, message.details || '成功'), ESYS_ToastMessageType.SUCCESS);
 				break;
 			case 'error':
@@ -127,6 +149,59 @@ async function handleFreeCADMessage(event: MessageEvent<any>): Promise<void> {
 	catch (error) {
 		console.error(`[收到] 消息处理异常:`, error);
 	}
+}
+
+// ==================== 分片上传工具 ====================
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+	const bytes = new Uint8Array(buffer);
+	const chunkSize = 8192;
+	let binary = '';
+	for (let i = 0; i < bytes.length; i += chunkSize) {
+		const slice = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+		binary += String.fromCharCode.apply(null, slice);
+	}
+	return btoa(binary);
+}
+
+async function sendFileChunked(buffer: ArrayBuffer, filename: string): Promise<void> {
+	const sessionId = Date.now().toString(36) + Math.random().toString(36).substring(2);
+	activeUploadSessionId = sessionId;
+
+	const totalSize = buffer.byteLength;
+	const totalChunks = Math.ceil(totalSize / CHUNK_SIZE);
+
+	sendToFreeCAD({
+		type: 'file_upload_start',
+		sessionId,
+		filename,
+		totalSize,
+		totalChunks,
+	});
+
+	// Wait a tick for server to be ready
+	await new Promise(r => setTimeout(r, 50));
+
+	for (let i = 0; i < totalChunks; i++) {
+		const start = i * CHUNK_SIZE;
+		const end = Math.min(start + CHUNK_SIZE, totalSize);
+		const chunk = buffer.slice(start, end);
+		const base64Data = arrayBufferToBase64(chunk);
+
+		sendToFreeCAD({
+			type: 'file_upload_chunk',
+			sessionId,
+			index: i,
+			data: base64Data,
+		});
+
+		// Yield to event loop every 10 chunks to avoid blocking UI
+		if (i % 10 === 9) {
+			await new Promise(r => setTimeout(r, 0));
+		}
+	}
+
+	console.log('[上传] 所有分片已发送: ' + totalChunks + ' 片, ' + (totalSize / 1024).toFixed(1) + ' KB');
 }
 
 // ==================== 导出 ====================
@@ -164,7 +239,7 @@ export async function exportToFreeCAD(): Promise<void> {
 			throw new Error('PCB文件数据为空');
 
 		const filename = pcbFile.name.endsWith('.step') ? pcbFile.name : `${pcbFile.name}.step`;
-		eda.sys_WebSocket.send(FREECAD_WEBSOCKET_ID, JSON.stringify({ type: 'file_upload', filename, size: pcbFile.size, data: Array.from(new Uint8Array(fileArrayBuffer)) }));
+		await sendFileChunked(fileArrayBuffer, filename);
 		eda.sys_Message.showToastMessage(eda.sys_I18n.text('正在发送文件到FreeCAD: ${1} KB', undefined, undefined, (fileArrayBuffer.byteLength / 1024).toFixed(2)), ESYS_ToastMessageType.INFO);
 	}
 	catch (error) {
