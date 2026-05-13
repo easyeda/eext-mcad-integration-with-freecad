@@ -128,6 +128,7 @@ async function handleFreeCADMessage(event: MessageEvent<any>): Promise<void> {
 				break;
 			case 'error':
 				isExporting = false;
+				activeUploadSessionId = null;
 				eda.sys_Message.showToastMessage(eda.sys_I18n.text('FreeCAD错误: ${1}', undefined, undefined, message.message), ESYS_ToastMessageType.ERROR);
 				break;
 			case 'mapping_result':
@@ -183,6 +184,7 @@ async function sendFileChunked(buffer: ArrayBuffer, filename: string): Promise<v
 	await new Promise(r => setTimeout(r, 50));
 
 	for (let i = 0; i < totalChunks; i++) {
+			if (!wsReady) throw new Error("上��过程中连接断开");
 		const start = i * CHUNK_SIZE;
 		const end = Math.min(start + CHUNK_SIZE, totalSize);
 		const chunk = buffer.slice(start, end);
@@ -239,8 +241,8 @@ export async function exportToFreeCAD(): Promise<void> {
 			throw new Error('PCB文件数据为空');
 
 		const filename = pcbFile.name.endsWith('.step') ? pcbFile.name : `${pcbFile.name}.step`;
-		await sendFileChunked(fileArrayBuffer, filename);
 		eda.sys_Message.showToastMessage(eda.sys_I18n.text('正在发送文件到FreeCAD: ${1} KB', undefined, undefined, (fileArrayBuffer.byteLength / 1024).toFixed(2)), ESYS_ToastMessageType.INFO);
+		await sendFileChunked(fileArrayBuffer, filename);
 	}
 	catch (error) {
 		isExporting = false;

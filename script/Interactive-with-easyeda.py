@@ -99,9 +99,9 @@ class MessageQueue:
     def put(self, message):
         self.queue.put(message)
 
-    def get_all(self):
+    def get_all(self, max_count=20):
         messages = []
-        while not self.queue.empty():
+        while not self.queue.empty() and len(messages) < max_count:
             try:
                 messages.append(self.queue.get_nowait())
             except queue.Empty:
@@ -165,11 +165,13 @@ class WebSocketPCBServer:
         self.last_update_source = None  # 防止循环更新: 'eda' 或 None
         self.last_selected_labels = set()  # 上次选中的对象 label 集合
         self.last_freecad_move_time = 0   # 用户在 FreeCAD 中最后操作的时间戳
+        self._obj_by_label = {}            # label → FreeCAD object 缓存索引
 
         # 分片上传状态
         self.active_uploads = {}          # session_id → ChunkedUploadSession
         self.import_in_progress = False
         self.import_start_time = 0
+        self._upload_cleanup_interval = 60  # 秒，上传会话超时
 
         print(f"初始化WebSocket服务器 {host}:{port}")
 
@@ -189,6 +191,24 @@ class WebSocketPCBServer:
                 abs(a['y'] - b['y']) < pos_tol and
                 abs(a['z'] - b['z']) < pos_tol and
                 abs(a['yaw'] - b['yaw']) < rot_tol)
+
+    def _rebuild_obj_index(self, doc=None):
+        """重建 label → FreeCAD object 的缓存索引，避免 O(N²) 查找"""
+        try:
+            import FreeCAD
+            if not doc:
+                doc = FreeCAD.ActiveDocument
+            if not doc:
+                self._obj_by_label = {}
+                return
+            self._obj_by_label = {}
+            for obj in doc.Objects:
+                try:
+                    self._obj_by_label[obj.Label] = obj
+                except Exception:
+                    pass
+        except Exception:
+            self._obj_by_label = {}
 
     async def register_client(self, websocket, path=None):
         self.clients.add(websocket)
@@ -216,9 +236,7 @@ class WebSocketPCBServer:
         try:
             data = json.loads(message)
             message_type = data.get('type')
-            if message_type == 'file_upload':
-                await self.handle_file_upload(websocket, data)
-            elif message_type == 'file_upload_start':
+            if message_type == 'file_upload_start':
                 await self.handle_upload_start(websocket, data)
             elif message_type == 'file_upload_chunk':
                 await self.handle_upload_chunk(websocket, data)
@@ -247,54 +265,6 @@ class WebSocketPCBServer:
             await self.send_error(websocket, f"消息处理错误: {str(e)}")
 
     # ==================== 文件导入 ====================
-
-    async def handle_file_upload(self, websocket, data):
-        try:
-            filename = data.get('filename')
-            file_size = data.get('size')
-            file_data = data.get('data')
-
-            if not all([filename, file_size, file_data]):
-                await self.send_error(websocket, "文件数据不完整")
-                return
-
-            print(f"接收文件: {filename} ({file_size} bytes)")
-
-            await websocket.send(json.dumps({
-                "type": "upload_progress",
-                "progress": 50,
-                "status": "processing"
-            }))
-
-            file_bytes = bytes(file_data)
-            temp_dir = tempfile.mkdtemp(prefix="pcb_step_")
-            temp_file_path = os.path.join(temp_dir, filename)
-
-            with open(temp_file_path, 'wb') as f:
-                f.write(file_bytes)
-
-            await websocket.send(json.dumps({
-                "type": "upload_progress",
-                "progress": 100,
-                "status": "upload_done"
-            }))
-
-            await websocket.send(json.dumps({
-                "type": "upload_complete",
-                "message": "开始导入..."
-            }))
-
-            import_task = {
-                'type': 'import_step',
-                'file_path': temp_file_path,
-                'temp_dir': temp_dir,
-                'filename': filename,
-                'sync': data.get('sync', False),
-            }
-            self.message_queue.put(import_task)
-
-        except Exception as e:
-            await self.send_error(websocket, f"文件处理错误: {str(e)}")
 
     async def handle_upload_start(self, websocket, data):
         """处理分片上传开始请求"""
@@ -354,6 +324,12 @@ class WebSocketPCBServer:
             # 所有分片已接收完成
             if session.received_chunks >= session.total_chunks:
                 session.finish()
+                if session.received_bytes != session.total_size:
+                    print(f"[分片上传] 文件大小不匹配: 期望{session.total_size}, 实际{session.received_bytes}")
+                    await self.send_error(websocket, f"文件大小校验失败: 期望{session.total_size}字节, 实际{session.received_bytes}字节")
+                    session.cleanup()
+                    del self.active_uploads[session_id]
+                    return
                 print(f"[分片上传] 完成: {session.filename}, {session.received_bytes} bytes, 耗时{time.time()-session.start_time:.1f}s")
 
                 await websocket.send(json.dumps({
@@ -541,13 +517,7 @@ class WebSocketPCBServer:
                 except Exception:
                     pass
 
-            # 打印调试信息
-            print(f"[映射] EDA 发送 {len(components)} 个元件:")
-            for c in components:
-                print(f"  EDA: {c['designator']} x={c.get('x','?')} y={c.get('y','?')} rot={c.get('rotation','?')}")
-            print(f"[映射] FreeCAD 有 {len(freecad_objects)} 个对象:")
-            for o in freecad_objects:
-                print(f"  FC: Label='{o['label']}' Name='{o['name']}' x={o['x']:.2f} y={o['y']:.2f} z={o['z']:.2f}")
+            print(f"[映射] EDA {len(components)} 个元件, FreeCAD {len(freecad_objects)} 个对象")
 
             self.designator_map.clear()
             self.label_map.clear()
@@ -668,7 +638,7 @@ class WebSocketPCBServer:
         designator = data.get('designator')
         if not designator:
             return
-        print(f"[位置更新] 收到 EDA 位置更新: {designator} x={data.get('x')} y={data.get('y')} rot={data.get('rotation')}")
+        print(f"[位置更新] {designator} x={data.get('x'):.1f} y={data.get('y'):.1f}")
         self.message_queue.put({
             'type': 'position_update',
             'designator': designator,
@@ -700,6 +670,8 @@ class WebSocketPCBServer:
             if not doc:
                 return
 
+            self._rebuild_obj_index(doc)
+
             # 标记来源为 EDA，防止循环
             self.last_update_source = 'eda'
 
@@ -708,13 +680,8 @@ class WebSocketPCBServer:
 
             # 坐标合理性检查：超过 500mm 的移动视为异常，跳过
             main_label = self.designator_map.get(designator)
-            main_obj = None
-            for o in doc.Objects:
-                if o.Label == main_label and hasattr(o, 'Placement'):
-                    main_obj = o
-                    break
-
-            if not main_obj:
+            main_obj = self._obj_by_label.get(main_label)
+            if not main_obj or not hasattr(main_obj, 'Placement'):
                 return
 
             old_p = main_obj.Placement
@@ -734,17 +701,16 @@ class WebSocketPCBServer:
 
             # 移动同组所有对象
             for label in group:
-                for o in doc.Objects:
-                    if o.Label == label and hasattr(o, 'Placement'):
-                        p = o.Placement
-                        if label == main_label:
-                            o.Placement = FC.Placement(FC.Vector(fc_x, fc_y, p.Base.z), new_rot)
-                        else:
-                            o.Placement = FC.Placement(
-                                FC.Vector(p.Base.x + dx, p.Base.y + dy, p.Base.z),
-                                FC.Rotation(FC.Vector(0, 0, 1), p.Rotation.getYawPitchRoll()[0] + d_rot)
-                            )
-                        break
+                o = self._obj_by_label.get(label)
+                if o and hasattr(o, 'Placement'):
+                    p = o.Placement
+                    if label == main_label:
+                        o.Placement = FC.Placement(FC.Vector(fc_x, fc_y, p.Base.z), new_rot)
+                    else:
+                        o.Placement = FC.Placement(
+                            FC.Vector(p.Base.x + dx, p.Base.y + dy, p.Base.z),
+                            FC.Rotation(FC.Vector(0, 0, 1), p.Rotation.getYawPitchRoll()[0] + d_rot)
+                        )
 
             # 更新快照
             self.snapshot_positions()
@@ -775,6 +741,7 @@ class WebSocketPCBServer:
                 return
 
             resolved_old = self._resolve_designator(old)
+            self._rebuild_obj_index(doc)
             if not resolved_old:
                 print(f"[重命名] 未找到旧位号={old} 的映射")
                 return
@@ -793,38 +760,31 @@ class WebSocketPCBServer:
             group = self.designator_groups.pop(old, None)
             if group:
                 self.designator_groups[new] = group
-                # 重命名同组所有对象的 Label
                 old_group = self.designator_groups.get(new, [])
                 new_group = []
                 for lbl in old_group:
                     obj_lbl = lbl.replace(old, new) if old in lbl else lbl
                     new_group.append(obj_lbl)
-                    # 更新 label_map
                     desig = self.label_map.pop(lbl, None)
                     if desig:
                         self.label_map[obj_lbl] = new if desig == old else desig
-                    # 更新 last_positions
                     pos = self.last_positions.pop(lbl, None)
                     if pos:
                         self.last_positions[obj_lbl] = pos
-                    # 更新 FreeCAD 对象 Label
-                    for o in doc.Objects:
-                        if o.Label == lbl:
-                            o.Label = obj_lbl
-                            break
+                    obj = self._obj_by_label.get(lbl)
+                    if obj:
+                        obj.Label = obj_lbl
                 self.designator_groups[new] = new_group
             else:
-                # 没有分组，单独处理
                 desig = self.label_map.pop(old_label, None)
                 if desig:
                     self.label_map[new_label] = new
                 pos = self.last_positions.pop(old_label, None)
                 if pos:
                     self.last_positions[new_label] = pos
-                for o in doc.Objects:
-                    if o.Label == old_label:
-                        o.Label = new_label
-                        break
+                obj = self._obj_by_label.get(old_label)
+                if obj:
+                    obj.Label = new_label
 
             print(f"[重命名] {old}({old_label}) → {new}({new_label})")
         except Exception as e:
@@ -860,17 +820,18 @@ class WebSocketPCBServer:
             if not doc:
                 return
 
+            self._rebuild_obj_index(doc)
+
             # 删除同组所有对象
             labels_to_delete = set(group) if group else {label}
             print(f"[删除] {designator}: 删除 {len(labels_to_delete)} 个对象")
             for lbl in labels_to_delete:
-                for obj in list(doc.Objects):
-                    if obj.Label == lbl:
-                        try:
-                            doc.removeObject(obj.Name)
-                        except Exception:
-                            pass
-                        break
+                obj = self._obj_by_label.get(lbl)
+                if obj:
+                    try:
+                        doc.removeObject(obj.Name)
+                    except Exception:
+                        pass
 
             # 清除映射
             self.designator_map.pop(designator, None)
@@ -911,12 +872,9 @@ class WebSocketPCBServer:
             if not doc:
                 return
 
-            obj = None
-            for o in doc.Objects:
-                if o.Label == label:
-                    obj = o
-                    break
+            self._rebuild_obj_index(doc)
 
+            obj = self._obj_by_label.get(label)
             if not obj:
                 return
 
@@ -965,19 +923,18 @@ class WebSocketPCBServer:
                 return
 
             for label in self.label_map:
-                for obj in doc.Objects:
-                    if obj.Label == label and hasattr(obj, 'Placement'):
-                        p = obj.Placement
-                        yaw, pitch, roll = p.Rotation.getYawPitchRoll()
-                        self.last_positions[label] = {
-                            'x': p.Base.x,
-                            'y': p.Base.y,
-                            'z': p.Base.z,
-                            'yaw': yaw,
-                            'pitch': pitch,
-                            'roll': roll
-                        }
-                        break
+                obj = self._obj_by_label.get(label)
+                if obj and hasattr(obj, 'Placement'):
+                    p = obj.Placement
+                    yaw, pitch, roll = p.Rotation.getYawPitchRoll()
+                    self.last_positions[label] = {
+                        'x': p.Base.x,
+                        'y': p.Base.y,
+                        'z': p.Base.z,
+                        'yaw': yaw,
+                        'pitch': pitch,
+                        'roll': roll
+                    }
         except Exception as e:
             print(f"[位置快照] 记录位置失败: {e}")
 
@@ -986,11 +943,6 @@ class WebSocketPCBServer:
         if not self.monitor_active or self.last_update_source is not None:
             return
 
-        # 调试日志：首次调用时打印状态
-        if not hasattr(self, '_check_debug_printed'):
-            self._check_debug_printed = True
-            print(f"[位置监听] 监听已激活，label_map有 {len(self.label_map)} 个对象，last_positions有 {len(self.last_positions)} 个快照")
-
         try:
             import FreeCAD
 
@@ -998,48 +950,45 @@ class WebSocketPCBServer:
             if not doc:
                 return
 
-            notified = set()  # 避免同一 designator 重复通知
+            self._rebuild_obj_index(doc)
+
+            notified = set()
             for label, designator in self.label_map.items():
                 if designator in notified:
                     continue
-                for obj in doc.Objects:
-                    if obj.Label == label and hasattr(obj, 'Placement'):
-                        p = obj.Placement
-                        yaw, pitch, roll = p.Rotation.getYawPitchRoll()
-                        current = {
-                            'x': p.Base.x,
-                            'y': p.Base.y,
-                            'z': p.Base.z,
-                            'yaw': yaw,
-                            'pitch': pitch,
-                            'roll': roll
-                        }
-                        last = self.last_positions.get(label)
-                        if last and not self._position_equal(current, last):
-                            # 只用主对象的位置发通知
-                            main_label = self.designator_map.get(designator)
-                            if label == main_label:
-                                # FreeCAD 坐标加上居中偏移，还原为 EDA 坐标（mm）
-                                eda_x = current['x'] + self.center_offset['x']
-                                eda_y = current['y'] + self.center_offset['y']
-                                # 单次移动超过 50mm 视为异常，跳过
-                                if last and (abs(eda_x - (last['x'] + self.center_offset['x'])) > 50 or
-                                             abs(eda_y - (last['y'] + self.center_offset['y'])) > 50):
-                                    print(f"[位置监听] 跳过异常位移: {designator}")
-                                    self.last_positions[label] = current
-                                    continue
-                                print(f"[位置监听] {designator}: ({last['x']:.2f}, {last['y']:.2f}) -> ({current['x']:.2f}, {current['y']:.2f}) mm, EDA坐标=({eda_x:.2f}, {eda_y:.2f})")
-                                self.send_to_clients({
-                                    "type": "position_update_from_freecad",
-                                    "designator": designator,
-                                    "x": eda_x,
-                                    "y": eda_y,
-                                    "rotation": yaw
-                                })
-                                notified.add(designator)
-                                self.last_freecad_move_time = time.time()
+                obj = self._obj_by_label.get(label)
+                if not obj or not hasattr(obj, 'Placement'):
+                    continue
+                p = obj.Placement
+                yaw, pitch, roll = p.Rotation.getYawPitchRoll()
+                current = {
+                    'x': p.Base.x,
+                    'y': p.Base.y,
+                    'z': p.Base.z,
+                    'yaw': yaw,
+                    'pitch': pitch,
+                    'roll': roll
+                }
+                last = self.last_positions.get(label)
+                if last and not self._position_equal(current, last):
+                    main_label = self.designator_map.get(designator)
+                    if label == main_label:
+                        eda_x = current['x'] + self.center_offset['x']
+                        eda_y = current['y'] + self.center_offset['y']
+                        if last and (abs(eda_x - (last['x'] + self.center_offset['x'])) > 50 or
+                                     abs(eda_y - (last['y'] + self.center_offset['y'])) > 50):
                             self.last_positions[label] = current
-                        break
+                            continue
+                        self.send_to_clients({
+                            "type": "position_update_from_freecad",
+                            "designator": designator,
+                            "x": eda_x,
+                            "y": eda_y,
+                            "rotation": yaw
+                        })
+                        notified.add(designator)
+                        self.last_freecad_move_time = time.time()
+                    self.last_positions[label] = current
         except Exception as e:
             print(f"检查位置变化失败: {e}")
 
@@ -1108,6 +1057,18 @@ class WebSocketPCBServer:
 
         except Exception as e:
             print(f"[删除监听] 检查删除失败: {e}")
+
+    def _cleanup_stale_uploads(self):
+        """清理超时的上传会话（60秒无新分片）"""
+        now = time.time()
+        stale = []
+        for sid, session in self.active_uploads.items():
+            if now - session.start_time > self._upload_cleanup_interval:
+                stale.append(sid)
+        for sid in stale:
+            print(f"[上传清理] 会话 {sid} 超时，清理")
+            self.active_uploads[sid].cleanup()
+            del self.active_uploads[sid]
 
     # ==================== 消息队列处理 ====================
 
@@ -1216,7 +1177,8 @@ class WebSocketPCBServer:
             msg_type = message_dict.get('type', '?')
             for client in list(self.clients):
                 future = asyncio.run_coroutine_threadsafe(client.send(data), self.loop)
-            print(f"[发送] 已提交到event loop: type={msg_type}, 数据长度={len(data)}, 客户端数={len(self.clients)}")
+            if msg_type not in ('position_update_from_freecad', 'import_progress'):
+                print(f"[发送] type={msg_type}, 长度={len(data)}, 客户端数={len(self.clients)}")
         except Exception as e:
             print(f"发送消息到客户端失败: {e}")
             import traceback
@@ -1331,6 +1293,7 @@ if is_freecad_environment():
         monitor_timer.timeout.connect(server.check_position_changes)
         monitor_timer.timeout.connect(server.check_selection_changes)
         monitor_timer.timeout.connect(server.check_deleted_objects)
+        monitor_timer.timeout.connect(server._cleanup_stale_uploads)
         monitor_timer.start(500)
         print("已注册位置监听定时器（500ms轮询位置+选中+删除）")
     else:
