@@ -22,7 +22,10 @@ function stateSnapshot(): string {
 	return `wsReady=${wsReady}, isBidirectional=${isBidirectionalEnabled()}, edaMap=${designatorToPrimitiveId.size}, fcMap=${freecadLabelToDesignator.size}`;
 }
 
-export function activate(status?: 'onStartupFinished', arg?: string): void {}
+export function activate(status?: 'onStartupFinished', arg?: string): void {
+	// 启动时重置双向状态为false，确保每次重启都需要用户手动启用
+	eda.sys_Storage.setExtensionUserConfig(STORAGE_KEY_BIDIRECTIONAL, false);
+}
 
 export function about(): void {
 	eda.sys_Dialog.showInformationMessage(
@@ -135,6 +138,7 @@ export async function exportToFreeCAD(): Promise<void> {
 	}
 	try {
 		isExporting = true;
+		disableBidirectional();
 		if (!wsReady) {
 			eda.sys_Message.showToastMessage(eda.sys_I18n.text('正在连接到FreeCAD服务器...'), ESYS_ToastMessageType.INFO);
 			await connectToFreeCADAsync();
