@@ -444,13 +444,13 @@ class WebSocketPCBServer:
                         used_fc_objects.add(i)
                         break
 
-            # 第二轮：label 单词边界匹配（R5 匹配 "R5~R0402XX" 但不匹配 "R50"）
+            # 第二轮：label 起始匹配（位号必须在 Label 开头，防止 "L1.0" 等尺寸描述误匹配）
             for comp in components:
                 designator = comp['designator']
                 if designator in self.designator_map:
                     continue
-                # 前面不能是字母或数字，后面不能是数字（防止 R1 匹配 R10）
-                pattern = re.compile(r'(?<![A-Za-z0-9])' + re.escape(designator) + r'(?![0-9])', re.IGNORECASE)
+                # 从 Label 开头匹配位号，后面不能是数字（防止 C2 匹配 C20）
+                pattern = re.compile(r'^' + re.escape(designator) + r'(?![0-9])', re.IGNORECASE)
                 for i, fc_obj in enumerate(freecad_objects):
                     if i in used_fc_objects:
                         continue
@@ -461,12 +461,10 @@ class WebSocketPCBServer:
                         used_fc_objects.add(i)
                         break
 
-            # 第三轮：位置匹配（EDA 已发送 mm 坐标，需补偿居中偏移）
-            # 尝试多种坐标轴映射：EDA(X,Y) 可能对应 FreeCAD (X,Y), (X,Z), (X,-Y) 等
-            TOLERANCE_MM = 2.0  # 2mm 容忍度
+            # 第三轮：位置匹配（只使用直接XY映射，STEP导出坐标系固定）
+            TOLERANCE_MM = 0.5  # 0.5mm 容忍度
             cx = self.center_offset['x']
             cy = self.center_offset['y']
-            cz = self.center_offset['z']
             for comp in components:
                 designator = comp['designator']
                 if designator in self.designator_map:
@@ -478,18 +476,9 @@ class WebSocketPCBServer:
                 for i, fc_obj in enumerate(freecad_objects):
                     if i in used_fc_objects:
                         continue
-                    # FC 对象位置 = 原始位置 - 居中偏移，加回偏移得到原始坐标
                     rx = fc_obj['x'] + cx
                     ry = fc_obj['y'] + cy
-                    rz = fc_obj['z'] + cz
-                    # 尝试多种轴映射，取最小距离
-                    dists = [
-                        ((rx - eda_x_mm) ** 2 + (ry - eda_y_mm) ** 2) ** 0.5,   # XY
-                        ((rx - eda_x_mm) ** 2 + (rz - eda_y_mm) ** 2) ** 0.5,   # XZ (板子在XZ平面)
-                        ((rx - eda_x_mm) ** 2 + (-ry - eda_y_mm) ** 2) ** 0.5,  # X,-Y
-                        ((rx - eda_x_mm) ** 2 + (-rz - eda_y_mm) ** 2) ** 0.5,  # X,-Z
-                    ]
-                    dist = min(dists)
+                    dist = ((rx - eda_x_mm) ** 2 + (ry - eda_y_mm) ** 2) ** 0.5
                     if dist < TOLERANCE_MM and dist < best_dist:
                         best_dist = dist
                         best_match = i
@@ -517,19 +506,25 @@ class WebSocketPCBServer:
                         break
                 if not main_pos:
                     continue
-                # 只将非主对象的、同位置的对象归入分组
+                # 只将非主对象的、同位号的对象归入分组
                 group = [main_label]  # 主对象始终在组内
+                # 排除不需要匹配的层对象
+                skip_keywords = ('topcopper', 'board', 'topsilkscreen')
+                # 位号必须在 Label 开头，防止 "L1.0" 等尺寸描述误匹配
+                desig_pattern = re.compile(r'^' + re.escape(designator) + r'(?![0-9])', re.IGNORECASE)
                 for o in freecad_objects:
                     if o['label'] == main_label:
                         continue
-                    # 跳过其他元件的主对象
                     if o['label'] in main_labels:
                         continue
-                    dist = ((o['x'] - main_pos[0]) ** 2 + (o['y'] - main_pos[1]) ** 2) ** 0.5
-                    if dist < TOLERANCE:
-                        group.append(o['label'])
-                        if o['label'] not in self.label_map:
-                            self.label_map[o['label']] = designator
+                    label_lower = o['label'].lower()
+                    if any(kw in label_lower for kw in skip_keywords):
+                        continue
+                    if not desig_pattern.search(o['label']):
+                        continue
+                    group.append(o['label'])
+                    if o['label'] not in self.label_map:
+                        self.label_map[o['label']] = designator
                 self.designator_groups[designator] = group
                 if len(group) > 1:
                     print(f"  [分组] {designator}: {len(group)} 个对象 -> {group}")
@@ -588,6 +583,7 @@ class WebSocketPCBServer:
             fc_x = x - self.center_offset['x']
             fc_y = y - self.center_offset['y']
 
+            # 坐标合理性检查：超过 500mm 的移动视为异常，跳过
             main_label = self.designator_map.get(designator)
             main_obj = None
             for o in doc.Objects:
@@ -601,6 +597,11 @@ class WebSocketPCBServer:
             old_p = main_obj.Placement
             dx = fc_x - old_p.Base.x
             dy = fc_y - old_p.Base.y
+
+            if abs(dx) > 500 or abs(dy) > 500:
+                print(f"[位置更新] 跳过异常位移: dx={dx:.2f} dy={dy:.2f}")
+                return
+
             old_yaw = old_p.Rotation.getYawPitchRoll()[0]
             d_rot = rotation - old_yaw
 
@@ -898,6 +899,12 @@ class WebSocketPCBServer:
                                 # FreeCAD 坐标加上居中偏移，还原为 EDA 坐标（mm）
                                 eda_x = current['x'] + self.center_offset['x']
                                 eda_y = current['y'] + self.center_offset['y']
+                                # 单次移动超过 50mm 视为异常，跳过
+                                if last and (abs(eda_x - (last['x'] + self.center_offset['x'])) > 50 or
+                                             abs(eda_y - (last['y'] + self.center_offset['y'])) > 50):
+                                    print(f"[位置监听] 跳过异常位移: {designator}")
+                                    self.last_positions[label] = current
+                                    continue
                                 print(f"[位置监听] {designator}: ({last['x']:.2f}, {last['y']:.2f}) -> ({current['x']:.2f}, {current['y']:.2f}) mm, EDA坐标=({eda_x:.2f}, {eda_y:.2f})")
                                 self.send_to_clients({
                                     "type": "position_update_from_freecad",
@@ -1077,7 +1084,9 @@ class WebSocketPCBServer:
                         self.register_client,
                         self.host,
                         self.port,
-                        max_size=100 * 1024 * 1024
+                        max_size=100 * 1024 * 1024,
+                        ping_interval=None,
+                        ping_timeout=None,
                     )
 
                 self.server = self.loop.run_until_complete(create_server())
