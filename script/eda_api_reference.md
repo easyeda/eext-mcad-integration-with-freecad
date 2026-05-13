@@ -102,7 +102,16 @@ eda.sys_I18n.text('导出失败: ${1}', undefined, undefined, errorMsg);
 
 发送数据或关闭连接。
 
+| 参数 | 类型 | 说明 |
+| ---- | ---- | ---- |
+| id | string | WebSocket 连接标识符 |
+| data | string \| ArrayBuffer \| ArrayBufferView | 要发送的数据（字符串会被作为文本帧发送） |
+| code | number | 关闭状态码，如 `1000` 表示正常关闭 |
+| reason | string | 关闭原因描述 |
+
 **⚠️ 注意：** `send()` 在连接已断开时**不会立即抛错**，需靠心跳机制检测断连。
+
+**⚠️ 大文件传输：** `send()` 发送的是完整 WebSocket 帧。大体积 JSON 会阻塞事件循环并可能超出对端 `max_size` 限制。对于文件传输，应使用 **分片 Base64 编码**（见踩坑记录 #6）。
 
 ***
 
@@ -113,6 +122,27 @@ eda.sys_I18n.text('导出失败: ${1}', undefined, undefined, errorMsg);
 本项目参数：`('pcbModel', 'step', ['Component Model', 'Silkscreen', 'Wire In Signal Layer'], 'Parts')`
 
 返回的 File 对象可用 `FileReader.readAsArrayBuffer()` 读取。
+
+**读取模式：**
+
+```typescript
+const pcbFile = await eda.pcb_ManufactureData.get3DFile('pcbModel', 'step', [...], 'Parts');
+if (!pcbFile) throw new Error('无法获取文件');
+
+const arrayBuffer = await new Promise<ArrayBuffer>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+        if (reader.result instanceof ArrayBuffer) resolve(reader.result);
+        else reject(new Error('FileReader返回的不是ArrayBuffer'));
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsArrayBuffer(pcbFile);
+});
+
+// arrayBuffer.byteLength 即文件大小（bytes）
+```
+
+**⚠️ 大文件处理：** PCB 的 STEP 文件可能超过 20MB。不要用 `Array.from(new Uint8Array(buffer))` 编码成 JSON（体积膨胀约 300%），应使用 **分片 Base64 传输**（见踩坑记录 #6）。
 
 ***
 
@@ -324,6 +354,49 @@ comp.setState_X(x_mil);
 ### 5. 连接状态检测
 
 `WebSocket.send()` 在连接断开后不会立即抛错。需要心跳机制（定时 ping/pong）检测真实连接状态。
+
+### 6. `Array.from(new Uint8Array())` 导致大文件传输失败
+
+将 ArrayBuffer 转为 JSON 数组发送时，每个字节变成一��十进制数字加逗号（如 `[72,101,108,...]`），体积膨胀约 **300%**。20MB 的 STEP 文件变成约 80MB 的 JSON 字符串，直接超出 WebSocket 帧限制导致断连。
+
+**错误做法：**
+
+```typescript
+// 体积膨胀 ~300%，大文件必断
+eda.sys_WebSocket.send(id, JSON.stringify({
+    type: 'file_upload',
+    data: Array.from(new Uint8Array(arrayBuffer))
+}));
+```
+
+**正确做法：分片 Base64 传输**
+
+```typescript
+const CHUNK_SIZE = 512 * 1024; // 512KB per chunk
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+    const bytes = new Uint8Array(buffer);
+    const chunkSize = 8192; // 分块转换避免 callstack 溢出
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+        const slice = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+        binary += String.fromCharCode.apply(null, slice);
+    }
+    return btoa(binary);
+}
+
+// 分片发送，每片 Base64 后约 682KB，远低于任何限制
+for (let i = 0; i < totalChunks; i++) {
+    const chunk = buffer.slice(i * CHUNK_SIZE, Math.min((i + 1) * CHUNK_SIZE, totalSize));
+    sendToFreeCAD({
+        type: 'file_upload_chunk',
+        index: i,
+        data: arrayBufferToBase64(chunk),
+    });
+}
+```
+
+Base64 编码仅 **33% 体积膨胀**（vs 原来的 ~300%），且单条消息体积可控。
 
 ***
 
