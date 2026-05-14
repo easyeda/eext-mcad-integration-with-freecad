@@ -125,7 +125,7 @@ async function handleFreeCADMessage(event: MessageEvent<any>): Promise<void> {
 			case 'import_complete':
 				isExporting = false;
 				activeUploadSessionId = null;
-				eda.sys_Message.showToastMessage(eda.sys_I18n.text('PCB导入完成: ${1}', undefined, undefined, message.details || '成功'), ESYS_ToastMessageType.SUCCESS);
+				eda.sys_Message.showToastMessage(eda.sys_I18n.text('PCB导入完成: ${1}', undefined, undefined, message.details || eda.sys_I18n.text('成功')), ESYS_ToastMessageType.SUCCESS);
 				break;
 			case 'error':
 				isExporting = false;

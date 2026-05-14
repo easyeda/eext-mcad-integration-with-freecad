@@ -32,5 +32,6 @@
 	"FreeCAD连接状态: ${1}": "FreeCAD connection status: ${1}",
 	"脚本内容为空": "Script content is empty",
 	"FreeCAD脚本已保存，请在FreeCAD中打开该文件运行": "FreeCAD script saved, please open it in FreeCAD to run",
-	"保存脚本失败: ${1}": "Failed to save script: ${1}"
+	"保存脚本失败: ${1}": "Failed to save script: ${1}",
+	"成功": "Success"
 }

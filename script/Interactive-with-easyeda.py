@@ -1135,8 +1135,8 @@ class WebSocketPCBServer:
                     self.import_in_progress = False
                     result_msg = {
                         "type": "import_complete" if success else "error",
-                        "details": "成功导入STEP模型" if success else None,
-                        "message": "STEP导入失败" if not success else None,
+                        "details": "success" if success else None,
+                        "message": "STEP import false" if not success else None,
                         "sessionId": session_id,
                     }
                     self.send_to_clients(result_msg)
