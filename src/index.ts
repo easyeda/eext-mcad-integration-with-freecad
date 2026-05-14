@@ -1,4 +1,5 @@
 import * as extensionConfig from '../extension.json';
+import freecadScriptContent from '../script/Interactive-with-easyeda.py';
 
 const FREECAD_WEBSOCKET_ID = 'freecad-pcb-exporter';
 const DEFAULT_FREECAD_ADDRESS = 'ws://localhost:8766';
@@ -609,4 +610,28 @@ export function checkFreeCADConnection(): void {
 		eda.sys_I18n.text('FreeCAD连接状态: ${1}', undefined, undefined, wsReady ? eda.sys_I18n.text('已连接') : eda.sys_I18n.text('未连接')),
 		wsReady ? ESYS_ToastMessageType.SUCCESS : ESYS_ToastMessageType.WARNING,
 	);
+}
+
+// ==================== 保存FreeCAD脚本 ====================
+
+export async function copyFreeCADScript(): Promise<void> {
+	const text = freecadScriptContent as string;
+	if (!text) {
+		eda.sys_Message.showToastMessage(eda.sys_I18n.text('脚本内容为空'), ESYS_ToastMessageType.ERROR);
+		return;
+	}
+	try {
+		const blob = new Blob([text], { type: 'text/x-python' });
+		await eda.sys_FileSystem.saveFile(blob, 'Interactive-with-easyeda.py');
+		eda.sys_Message.showToastMessage(
+			eda.sys_I18n.text('FreeCAD脚本已保存，请在FreeCAD中打开该文件运行'),
+			ESYS_ToastMessageType.SUCCESS,
+		);
+	}
+	catch (error) {
+		eda.sys_Message.showToastMessage(
+			eda.sys_I18n.text('保存脚本失败: ${1}', undefined, undefined, (error as Error).message),
+			ESYS_ToastMessageType.ERROR,
+		);
+	}
 }

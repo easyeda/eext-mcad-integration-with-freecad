@@ -49,6 +49,11 @@
 						"id": "DisableBidirectional",
 						"title": "停止双向交互",
 						"registerFn": "disableBidirectional"
+					},
+					{
+						"id": "CopyFreeCADScript",
+						"title": "下载脚本文件",
+						"registerFn": "copyFreeCADScript"
 					}
 				]
 			}

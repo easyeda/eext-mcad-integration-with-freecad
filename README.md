@@ -9,6 +9,7 @@
 | 功能      | 说明                                 |
 | ------- | ---------------------------------- |
 | 3D 模型导出 | 将 PCB 的 STEP 模型分片传输到 FreeCAD，支持大文件 |
+| 下载脚本文件  | 一键保存 FreeCAD 宏脚本到本地，免去手动复制          |
 | 双向位置同步  | EDA 拖动元件 → FreeCAD 跟着动，反之亦然        |
 | 交叉定位    | 点击一边的元件，另一边自动聚焦                    |
 | 删除同步    | EDA 删除元件，FreeCAD 同步移除              |
@@ -35,7 +36,10 @@
 2. 顶部菜单栏点击 **宏** → **宏编辑器**（或按 `Alt+F8`）
    ![FreeCAD 打开宏编辑器的菜单位置](images/1.jpg)
 3. 在宏编辑器中点击 **新建**（或 `Ctrl+N`）创建新宏
-4. 打开本项目 [script/Interactive-with-easyeda.py](https://github.com/easyeda/eext-mcad-integration-with-freecad/blob/main/script/Interactive-with-easyeda.py) 文件，将全部内容复制粘贴到宏编辑器中
+4. 打开本项目 [script/Interactive-with-easyeda.py](https://github.com/easyeda/eext-mcad-integration-with-freecad/blob/main/script/Interactive-with-easyeda.py) 文件，将全部内容复制粘贴到宏编辑器中（脚本文件也可以通过菜单 **FreeCAD机电协同** → **下载脚本文件**，一键保存到本地）
+
+![](images/12.jpg)
+
 5. 点击 **保存**（`Ctrl+S`），将宏命名，保存到默认宏目录
 6. 点击 **执行或双击执行**（绿色三角形按钮，或 `Ctrl+F5`）运行脚本
    ![操作流程](images/2.jpg)
@@ -81,8 +85,10 @@ FreeCAD环境已检测，服务器已启动
 
 3 上传完成后 FreeCAD 开始导入，EDA 显示「正在导入STEP文件到FreeCAD...」
 
-4 导入完成，EDA 显示「PCB导入完成」，FreeCAD 中显示 3D 模型
 ![进行中](images/11.jpg)
+
+4 导入完成，EDA 显示「PCB导入完成」，FreeCAD 中显示 3D 模型
+
 ![FreeCAD 中导入成功的 3D 模型](images/6.jpg)
 
 > **注意：** 大文件（元件多、3D 模型复杂）导入可能需要数分钟。导入期间 FreeCAD 界面会无响应，这是正常现象。后台心跳会持续保活连接，不会断开。
@@ -104,7 +110,7 @@ FreeCAD环境已检测，服务器已启动
    - **在 EDA 中点击元件** → FreeCAD 自动选中并聚焦
    - **在 FreeCAD 中点击对象** → EDA 自动定位到对应元件
 
-![双向同步效果](imagesimages/9.jpg)
+![双向同步效果](images/9.jpg)
 
 ### 三、停止双向交互
 

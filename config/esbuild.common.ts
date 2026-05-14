@@ -8,7 +8,7 @@ export default {
 	assetNames: '[name]',
 	bundle: true, // 用于内部方法调用，请勿修改
 	minify: false, // 用于内部方法调用，请勿修改
-	loader: {},
+	loader: { '.py': 'text' },
 	outdir: './dist/',
 	sourcemap: undefined,
 	platform: 'browser', // 用于内部方法调用，请勿修改
