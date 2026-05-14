@@ -143,6 +143,12 @@ async function handleFreeCADMessage(event: MessageEvent<any>): Promise<void> {
 			case 'delete_from_freecad':
 				await handleDeleteFromFreecad(message);
 				break;
+			case 'document_changed':
+				if (isBidirectionalEnabled()) {
+					disableBidirectional();
+					eda.sys_Message.showToastMessage(eda.sys_I18n.text('FreeCAD文档已切换，双向交互已自动停止，请重新启用'), ESYS_ToastMessageType.WARNING);
+				}
+				break;
 			default:
 				console.log(`[收到] 未知消息类型: ${message.type}`);
 		}

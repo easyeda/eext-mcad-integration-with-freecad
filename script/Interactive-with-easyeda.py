@@ -166,6 +166,7 @@ class WebSocketPCBServer:
         self.last_selected_labels = set()  # 上次选中的对象 label 集合
         self.last_freecad_move_time = 0   # 用户在 FreeCAD 中最后操作的时间戳
         self._obj_by_label = {}            # label → FreeCAD object 缓存索引
+        self._monitored_doc_name = None     # 启用监听时记录的文档名，用于检测文档切换
 
         # 分片上传状态
         self.active_uploads = {}          # session_id → ChunkedUploadSession
@@ -899,18 +900,29 @@ class WebSocketPCBServer:
         """启动位置监听"""
         if self.monitor_active:
             return
+        try:
+            import FreeCAD
+            doc = FreeCAD.ActiveDocument
+            if doc:
+                self._monitored_doc_name = doc.Name
+            else:
+                self._monitored_doc_name = None
+        except Exception:
+            self._monitored_doc_name = None
         self.monitor_active = True
         self.snapshot_positions()
-        print(f"FreeCAD端位置监听已启动，已记录 {len(self.last_positions)} 个对象初始位置")
+        print(f"FreeCAD端位置监听已启动，已记录 {len(self.last_positions)} 个对象初始位置，文档={self._monitored_doc_name}")
 
     def disable_monitor(self):
         """停止位置监听"""
         self.monitor_active = False
+        self._monitored_doc_name = None
         self.designator_map.clear()
         self.label_map.clear()
         self.designator_groups.clear()
         self.last_positions.clear()
         self.center_offset = {'x': 0, 'y': 0, 'z': 0}
+        self._obj_by_label = {}
         print("FreeCAD端位置监听已停止，所有映射表已清理")
 
     def snapshot_positions(self):
@@ -1069,6 +1081,25 @@ class WebSocketPCBServer:
             print(f"[上传清理] 会话 {sid} 超时，清理")
             self.active_uploads[sid].cleanup()
             del self.active_uploads[sid]
+
+    def check_document_change(self):
+        """检测 FreeCAD 活动文档是否切换，切换则自动禁用双向交互"""
+        if not self.monitor_active:
+            return
+        try:
+            import FreeCAD
+            doc = FreeCAD.ActiveDocument
+            current_name = doc.Name if doc else None
+            if current_name != self._monitored_doc_name:
+                print(f"[文档切换] 检测到文档变更: {self._monitored_doc_name} -> {current_name}，自动禁用双向交互")
+                self.send_to_clients({
+                    "type": "document_changed",
+                    "old_doc": self._monitored_doc_name,
+                    "new_doc": current_name,
+                })
+                self.disable_monitor()
+        except Exception:
+            pass
 
     # ==================== 消息队列处理 ====================
 
@@ -1290,6 +1321,7 @@ if is_freecad_environment():
 
         # 位置监听定时器（500ms 检查对象位置变化）
         monitor_timer = QTimer()
+        monitor_timer.timeout.connect(server.check_document_change)
         monitor_timer.timeout.connect(server.check_position_changes)
         monitor_timer.timeout.connect(server.check_selection_changes)
         monitor_timer.timeout.connect(server.check_deleted_objects)
