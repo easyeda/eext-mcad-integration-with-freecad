@@ -35,7 +35,7 @@
 2. 顶部菜单栏点击 **宏** → **宏编辑器**（或按 `Alt+F8`）
    ![FreeCAD 打开宏编辑器的菜单位置](images/1.jpg)
 3. 在宏编辑器中点击 **新建**（或 `Ctrl+N`）创建新宏
-4. 打开本项目 `script/Interactive-with-easyeda.py` 文件，将全部内容复制粘贴到宏编辑器中
+4. 打开本项目 [script/Interactive-with-easyeda.py](https://github.com/easyeda/eext-mcad-integration-with-freecad/blob/main/script/Interactive-with-easyeda.py) 文件，将全部内容复制粘贴到宏编辑器中
 5. 点击 **保存**（`Ctrl+S`），将宏命名，保存到默认宏目录
 6. 点击 **执行或双击执行**（绿色三角形按钮，或 `Ctrl+F5`）运行脚本
    ![操作流程](images/2.jpg)
