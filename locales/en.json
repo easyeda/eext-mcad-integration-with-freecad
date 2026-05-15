@@ -21,7 +21,7 @@
 	"未找到任何元件，无法启用双向交互": "No components found, cannot enable bidirectional interaction",
 	"没有元件有有效的位号，无法启用双向交互": "No components have valid designators, cannot enable bidirectional interaction",
 	"无法获取元件位置数据，无法启用双向交互": "Cannot get component position data, cannot enable bidirectional interaction",
-	"双向交互已启动，点击元件可以双向定位，拖动元件可以同步移动": "Bidirectional interaction enabled. Click to cross-probe, drag to sync position",
+	"双向交互已启动。提示：请确保元件已解锁（选中所有元件→右键→解锁），否则FreeCAD拖动无法同步": "Bidirectional interaction enabled. Tip: Make sure components are unlocked (Select All → Right-click → Unlock), otherwise FreeCAD dragging cannot sync",
 	"双向交互已停止": "Bidirectional interaction stopped",
 	"未匹配到任何元件，建议先导出模型再启用双向交互": "No components matched. Suggest exporting model first before enabling bidirectional interaction",
 	"未连接到FreeCAD服务器": "Not connected to FreeCAD server",

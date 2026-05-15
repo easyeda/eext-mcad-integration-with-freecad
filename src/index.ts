@@ -191,7 +191,8 @@ async function sendFileChunked(buffer: ArrayBuffer, filename: string): Promise<v
 	await new Promise(r => setTimeout(r, 50));
 
 	for (let i = 0; i < totalChunks; i++) {
-			if (!wsReady) throw new Error("上��过程中连接断开");
+		if (!wsReady)
+			throw new Error('上传过程中连接断开');
 		const start = i * CHUNK_SIZE;
 		const end = Math.min(start + CHUNK_SIZE, totalSize);
 		const chunk = buffer.slice(start, end);
@@ -210,7 +211,7 @@ async function sendFileChunked(buffer: ArrayBuffer, filename: string): Promise<v
 		}
 	}
 
-	console.log('[上传] 所有分片已发送: ' + totalChunks + ' 片, ' + (totalSize / 1024).toFixed(1) + ' KB');
+	console.log(`[上传] 所有分片已发送: ${totalChunks} 片, ${(totalSize / 1024).toFixed(1)} KB`);
 }
 
 // ==================== 导出 ====================
@@ -230,7 +231,7 @@ export async function exportToFreeCAD(): Promise<void> {
 				throw new Error('无法连接到FreeCAD服务器');
 		}
 		eda.sys_Message.showToastMessage(eda.sys_I18n.text('正在获取PCB 3D STEP文件...'), ESYS_ToastMessageType.INFO);
-		const pcbFile = await eda.pcb_ManufactureData.get3DFile('pcbModel', 'step', ['Component Model', 'Silkscreen', 'Wire In Signal Layer'], 'Parts');
+		const pcbFile = await eda.pcb_ManufactureData.get3DFile('pcbModel', 'step', ['Component Model'], 'Parts');
 		if (!pcbFile)
 			throw new Error('无法获取PCB 3D STEP文件');
 		eda.sys_Message.showToastMessage(eda.sys_I18n.text('PCB STEP文件获取成功: ${1} (${2} KB)', undefined, undefined, pcbFile.name, (pcbFile.size / 1024).toFixed(2)), ESYS_ToastMessageType.SUCCESS);
@@ -330,12 +331,14 @@ export async function enableBidirectional(): Promise<void> {
 		console.log(`[双向] MouseEventListener 已存在，跳过`);
 	}
 
+	const { offsetX, offsetY } = await eda.pcb_Document.getCanvasOrigin();
+
 	const componentData: Array<{ designator: string; x: number; y: number; rotation: number }> = [];
 	for (const [designator, primitiveId] of designatorToPrimitiveId) {
 		try {
 			const comp = await eda.pcb_PrimitiveComponent.get(primitiveId);
 			if (comp)
-				componentData.push({ designator, x: comp.getState_X() * MIL_TO_MM, y: comp.getState_Y() * MIL_TO_MM, rotation: comp.getState_Rotation() });
+				componentData.push({ designator, x: (comp.getState_X() - offsetX) * MIL_TO_MM, y: (comp.getState_Y() - offsetY) * MIL_TO_MM, rotation: comp.getState_Rotation() });
 		}
 		catch (error) {
 			console.error(`[双向] 获取元件 ${designator} 位置失败:`, error);
@@ -354,7 +357,7 @@ export async function enableBidirectional(): Promise<void> {
 		return;
 	}
 
-	// 先标记启用，��发消息
+	// 先标记启用，再发消息
 	eda.sys_Storage.setExtensionUserConfig(STORAGE_KEY_BIDIRECTIONAL, true);
 	console.log(`[双向] isBidirectional=true, 准备发送build_mapping`);
 
@@ -364,7 +367,7 @@ export async function enableBidirectional(): Promise<void> {
 	console.log(`[双向] enable_monitor 已发送`);
 
 	eda.sys_Message.showToastMessage(
-		eda.sys_I18n.text('双向交互已启动，点击元件可以双向定位，拖动元件可以同步移动'),
+		eda.sys_I18n.text('双向交互已启动。提示：请确保元件已解锁（选中所有元件→右键→解锁），否则FreeCAD拖动无法同步'),
 		ESYS_ToastMessageType.SUCCESS,
 	);
 	console.log(`[双向] ===== 启用完成 ===== ${stateSnapshot()}`);
@@ -473,7 +476,8 @@ async function syncPositionToFreecad(primitiveId: string, oldDesignator: string)
 			sendToFreeCAD({ type: 'rename_designator', old: oldDesignator, new: currentDesignator });
 		}
 
-		sendToFreeCAD({ type: 'position_update', designator: currentDesignator, x: comp.getState_X() * MIL_TO_MM, y: comp.getState_Y() * MIL_TO_MM, rotation: comp.getState_Rotation() });
+		const { offsetX: oX, offsetY: oY } = await eda.pcb_Document.getCanvasOrigin();
+		sendToFreeCAD({ type: 'position_update', designator: currentDesignator, x: (comp.getState_X() - oX) * MIL_TO_MM, y: (comp.getState_Y() - oY) * MIL_TO_MM, rotation: comp.getState_Rotation() });
 	}
 	catch (error) { console.error('[双向] 同步位置失败:', error); }
 }
@@ -523,8 +527,9 @@ async function handlePositionUpdateFromFreecad(message: any): Promise<void> {
 	try {
 		const comp = await eda.pcb_PrimitiveComponent.get(primitiveId);
 		if (!comp) return;
-		comp.setState_X(message.x * MM_TO_MIL);
-		comp.setState_Y(message.y * MM_TO_MIL);
+		const { offsetX: rX, offsetY: rY } = await eda.pcb_Document.getCanvasOrigin();
+		comp.setState_X(message.x * MM_TO_MIL + rX);
+		comp.setState_Y(message.y * MM_TO_MIL + rY);
 		comp.setState_Rotation(message.rotation);
 		await comp.done();
 		console.log(`[FC→EDA] 位置更新成功: ${designator}`);
