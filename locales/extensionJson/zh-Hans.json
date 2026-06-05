@@ -5,5 +5,12 @@
 	"停止双向交互": "停止双向交互",
 	"下载脚本文件": "下载脚本文件",
 	"连接FreeCAD": "连接FreeCAD",
-	"断开FreeCAD": "断开FreeCAD"
+	"断开FreeCAD": "断开FreeCAD",
+	"displayName": "FreeCAD机电协同",
+	"description": "通过WebSocket将PCB 3D模型发到FreeCAD进行查看和编辑",
+	"FreeCAD": "FreeCAD",
+	"PCB": "PCB",
+	"STEP": "STEP",
+	"3D": "3D",
+	"WebSocket": "WebSocket"
 }

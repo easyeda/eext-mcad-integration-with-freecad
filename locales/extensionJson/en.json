@@ -5,5 +5,12 @@
 	"停止双向交互": "Disable Bidirectional",
 	"下载脚本文件": "Download Script",
 	"连接FreeCAD": "Connect FreeCAD",
-	"断开FreeCAD": "Disconnect"
+	"断开FreeCAD": "Disconnect",
+	"displayName": "FreeCAD MCAD Integration",
+	"description": "Send PCB 3D models to FreeCAD via WebSocket for viewing and editing",
+	"FreeCAD": "FreeCAD",
+	"PCB": "PCB",
+	"STEP": "STEP",
+	"3D": "3D",
+	"WebSocket": "WebSocket"
 }

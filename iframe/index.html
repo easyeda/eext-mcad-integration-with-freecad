@@ -6,6 +6,14 @@
 		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
 	</head>
 	<body>
-		<p>这是一个示例 IFrame 页面</p>
+		<p id="sample-text"></p>
+		<script>
+			var edaObj = typeof eda !== 'undefined' ? eda : window.parent && window.parent.eda;
+			function t(tag) {
+				if (edaObj && edaObj.sys_I18n) return edaObj.sys_I18n.text(tag);
+				return tag;
+			}
+			document.getElementById('sample-text').textContent = t('这是一个示例 IFrame 页面');
+		</script>
 	</body>
 </html>
