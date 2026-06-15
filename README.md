@@ -1,4 +1,4 @@
-[简体中文](#)
+[简体中文](#) | [English](README_EN.md)
 
 # FreeCAD 机电协同 —— 嘉立创 EDA 专业版扩展
 
@@ -228,4 +228,3 @@ pcb-export-to-freeCad/
 ├── package.json
 └── tsconfig.json
 ```
-
