@@ -3,7 +3,7 @@
 	"uuid": "bbf0279eb3594be8a9a43aa5f08e9370",
 	"displayName": "FreeCAD机电协同",
 	"description": "通过WebSocket将PCB 3D模型发到FreeCAD进行查看和编辑",
-	"version": "1.2.1",
+	"version": "1.2.2",
 	"publisher": "EasyEDA",
 	"engines": {
 		"eda": "^3.0.0"
